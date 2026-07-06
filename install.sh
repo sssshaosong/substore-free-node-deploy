@@ -10,6 +10,8 @@ PUBLIC_SCHEME="${PUBLIC_SCHEME:-https}"
 IMAGE="${IMAGE:-xream/sub-store:http-meta}"
 CONTAINER_NAME="${CONTAINER_NAME:-sub-store}"
 SKIP_PULL="${SKIP_PULL:-0}"
+AUTO_BOOTSTRAP="${AUTO_BOOTSTRAP:-1}"
+COLLECTION_NAME="${COLLECTION_NAME:-free-auto}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ -z "${BIND_IP+x}" ]; then
@@ -69,11 +71,11 @@ ensure_curl() {
 
 start_docker_service() {
   if docker info >/dev/null 2>&1; then
-    log "1/6" "Docker daemon already running."
+    log "1/7" "Docker daemon already running."
     return 0
   fi
 
-  log "1/6" "Starting Docker daemon..."
+  log "1/7" "Starting Docker daemon..."
   if has_cmd systemctl; then
     systemctl enable docker >/dev/null 2>&1 || true
     systemctl start docker >/dev/null 2>&1 || true
@@ -94,12 +96,12 @@ start_docker_service() {
 
 ensure_docker() {
   if has_cmd docker; then
-    log "1/6" "Docker already installed: $(docker --version 2>/dev/null || true)"
+    log "1/7" "Docker already installed: $(docker --version 2>/dev/null || true)"
     start_docker_service
     return 0
   fi
 
-  log "1/6" "Docker missing, installing Docker..."
+  log "1/7" "Docker missing, installing Docker..."
   ensure_curl
   curl -fsSL https://get.docker.com | sh
   start_docker_service
@@ -124,15 +126,15 @@ install_compose_standalone() {
 
 ensure_compose() {
   if docker compose version >/dev/null 2>&1; then
-    log "2/6" "Docker Compose v2 already installed: $(docker compose version 2>/dev/null || true)"
+    log "2/7" "Docker Compose v2 already installed: $(docker compose version 2>/dev/null || true)"
     return 0
   fi
   if has_cmd docker-compose; then
-    log "2/6" "Legacy docker-compose already installed: $(docker-compose --version 2>/dev/null || true)"
+    log "2/7" "Legacy docker-compose already installed: $(docker-compose --version 2>/dev/null || true)"
     return 0
   fi
 
-  log "2/6" "Docker exists but Compose is missing, installing Compose..."
+  log "2/7" "Docker exists but Compose is missing, installing Compose..."
   if has_cmd apt-get; then
     apt-get update -y
     apt-get install -y docker-compose-plugin || true
@@ -146,7 +148,7 @@ ensure_compose() {
     return 0
   fi
 
-  log "2/6" "Package manager did not provide Compose, installing standalone docker-compose..."
+  log "2/7" "Package manager did not provide Compose, installing standalone docker-compose..."
   install_compose_standalone
 
   if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
@@ -166,15 +168,26 @@ generate_backend_path() {
   fi
 }
 
+validate_collection_name() {
+  case "$COLLECTION_NAME" in
+    *[!A-Za-z0-9._-]*|'')
+      die "COLLECTION_NAME must only contain letters, numbers, dot, underscore, and dash. Current: ${COLLECTION_NAME}"
+      ;;
+  esac
+}
+
 copy_project_files() {
   [ -f "$SCRIPT_DIR/sources.txt" ] || die "Missing sources.txt in project directory."
   [ -f "$SCRIPT_DIR/operators/01_fetch_today_clean.js" ] || die "Missing operators/01_fetch_today_clean.js."
   [ -f "$SCRIPT_DIR/operators/02_httpmeta_speed_filter.js" ] || die "Missing operators/02_httpmeta_speed_filter.js."
+  [ -f "$SCRIPT_DIR/scripts/bootstrap-substore.sh" ] || die "Missing scripts/bootstrap-substore.sh."
 
-  mkdir -p "$APP_DIR/data" "$APP_DIR/operators"
+  mkdir -p "$APP_DIR/data" "$APP_DIR/operators" "$APP_DIR/scripts"
   cp -f "$SCRIPT_DIR/sources.txt" "$APP_DIR/sources.txt"
   cp -f "$SCRIPT_DIR/operators/01_fetch_today_clean.js" "$APP_DIR/operators/01_fetch_today_clean.js"
   cp -f "$SCRIPT_DIR/operators/02_httpmeta_speed_filter.js" "$APP_DIR/operators/02_httpmeta_speed_filter.js"
+  cp -f "$SCRIPT_DIR/scripts/bootstrap-substore.sh" "$APP_DIR/scripts/bootstrap-substore.sh"
+  chmod +x "$APP_DIR/scripts/bootstrap-substore.sh"
 }
 
 load_existing_backend_path() {
@@ -199,6 +212,8 @@ DOMAIN=$DOMAIN
 PUBLIC_SCHEME=$PUBLIC_SCHEME
 IMAGE=$IMAGE
 CONTAINER_NAME=$CONTAINER_NAME
+AUTO_BOOTSTRAP=$AUTO_BOOTSTRAP
+COLLECTION_NAME=$COLLECTION_NAME
 BACKEND_PATH=$BACKEND_PATH
 ENVEOF
 
@@ -215,7 +230,7 @@ services:
     environment:
       SUB_STORE_FRONTEND_BACKEND_PATH: "/${BACKEND_PATH}"
       SUB_STORE_BACKEND_SYNC_CRON: "0 */6 * * *"
-      SUB_STORE_PRODUCE_CRON: "0 */6 * * *"
+      SUB_STORE_PRODUCE_CRON: "0 */6 * * *,collection,${COLLECTION_NAME}"
 YAMLEOF
 
   cat > "$APP_DIR/show-info.sh" <<'INFOEOF'
@@ -223,6 +238,8 @@ YAMLEOF
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./.env
+
+COLLECTION_NAME="${COLLECTION_NAME:-free-auto}"
 
 if [ -n "${DOMAIN:-}" ]; then
   FRONTEND_URL="${PUBLIC_SCHEME}://${DOMAIN}"
@@ -247,11 +264,21 @@ else
   UI_URL="http://${IP}:${PORT}?api=http://${IP}:${PORT}/${BACKEND_PATH}"
 fi
 
+V2RAYN_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/V2Ray%20URI?includeUnsupportedProxy=true"
+CLASH_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true"
+SINGBOX_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/sing-box?includeUnsupportedProxy=true"
+
 echo "Sub-Store frontend: ${FRONTEND_URL}"
 echo "Sub-Store backend : ${BACKEND_URL}"
 echo "One-line UI URL   : ${UI_URL}"
 echo
+echo "Ready subscription URLs:"
+echo "v2rayN      : ${V2RAYN_URL}"
+echo "Clash/Mihomo: ${CLASH_URL}"
+echo "sing-box    : ${SINGBOX_URL}"
+echo
 echo "Bind address      : ${BIND_IP}:${PORT} -> container 3001"
+echo "Preset collection : ${COLLECTION_NAME}"
 echo "Sources file      : ${APP_DIR}/sources.txt"
 echo "Speed script      : ${APP_DIR}/operators/02_httpmeta_speed_filter.js"
 echo
@@ -274,6 +301,10 @@ run_compose() {
 }
 run_compose pull
 run_compose up -d
+if [ -x ./scripts/bootstrap-substore.sh ]; then
+  ./scripts/bootstrap-substore.sh
+fi
+./show-info.sh
 UPDATEEOF
   chmod +x "$APP_DIR/update.sh"
 
@@ -309,6 +340,7 @@ print_plan() {
   log "PLAN" "APP_DIR=${APP_DIR}"
   log "PLAN" "PORT=${PORT}, BIND_IP=${BIND_IP}, CONTAINER_NAME=${CONTAINER_NAME}"
   log "PLAN" "USE_TUNNEL=${USE_TUNNEL}, NO_PUBLIC_IP=${NO_PUBLIC_IP}, DOMAIN=${DOMAIN:-none}"
+  log "PLAN" "AUTO_BOOTSTRAP=${AUTO_BOOTSTRAP}, COLLECTION_NAME=${COLLECTION_NAME}"
   log "PLAN" "IMAGE=${IMAGE}"
   if [ "$SKIP_PULL" = "1" ]; then
     log "PLAN" "SKIP_PULL=1, image pull will be skipped."
@@ -319,26 +351,34 @@ if [ "$(id -u)" -ne 0 ]; then
   die "Please run as root: sudo bash install.sh"
 fi
 
+validate_collection_name
 print_plan
 ensure_docker
 ensure_compose
 check_container_conflict
 
-log "3/6" "Copying project files to ${APP_DIR}..."
+log "3/7" "Copying project files to ${APP_DIR}..."
 copy_project_files
 write_runtime_files
 
 cd "$APP_DIR"
 if [ "$SKIP_PULL" = "1" ]; then
-  log "4/6" "Skipping image pull because SKIP_PULL=1."
+  log "4/7" "Skipping image pull because SKIP_PULL=1."
 else
-  log "4/6" "Pulling image: ${IMAGE}"
+  log "4/7" "Pulling image: ${IMAGE}"
   run_compose pull
 fi
 
-log "5/6" "Starting or updating Sub-Store..."
+log "5/7" "Starting or updating Sub-Store..."
 run_compose up -d
 
-log "6/6" "Done."
-sleep 3
+if [ "$AUTO_BOOTSTRAP" = "1" ]; then
+  log "6/7" "Bootstrapping built-in sources, collection, and speed operator..."
+  "$APP_DIR/scripts/bootstrap-substore.sh"
+else
+  log "6/7" "Skipping bootstrap because AUTO_BOOTSTRAP=0."
+fi
+
+log "7/7" "Done."
+sleep 1
 "$APP_DIR/show-info.sh"
