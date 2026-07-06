@@ -15,12 +15,13 @@ cd /opt/substore-free-node
 
 ```text
 Ready subscription URLs:
-v2rayN      : https://sub.example.com/后端路径/share/col/free-auto/V2Ray%20URI?includeUnsupportedProxy=true
+v2rayN      : https://sub.example.com/后端路径/share/col/free-auto/V2Ray?includeUnsupportedProxy=true
+URI raw     : https://sub.example.com/后端路径/share/col/free-auto/URI?includeUnsupportedProxy=true
 Clash/Mihomo: https://sub.example.com/后端路径/share/col/free-auto/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true
 sing-box    : https://sub.example.com/后端路径/share/col/free-auto/sing-box?includeUnsupportedProxy=true
 ```
 
-直接复制对应客户端的链接。
+直接复制对应客户端的链接。v2rayN 优先复制 `/V2Ray` 这个链接；`URI raw` 是未 base64 的原始 URI 列表，主要用于排查。
 
 注意：订阅地址必须包含随机后端路径，也就是：
 
@@ -63,7 +64,13 @@ cd /opt/substore-free-node
 复制 `show-info.sh` 输出的：
 
 ```text
-v2rayN: .../share/col/free-auto/V2Ray%20URI?includeUnsupportedProxy=true
+v2rayN: .../share/col/free-auto/V2Ray?includeUnsupportedProxy=true
+```
+
+不要再用旧版输出里的：
+
+```text
+.../V2Ray%20URI?includeUnsupportedProxy=true
 ```
 
 然后打开 v2rayN：
@@ -142,7 +149,7 @@ sing-box: .../share/col/free-auto/sing-box?includeUnsupportedProxy=true
 不同客户端界面不一样，核心原则是：
 
 ```text
-v2rayN       → 用 v2rayN 链接
+v2rayN       → 用 v2rayN 链接，也就是 /V2Ray
 Clash/Mihomo → 用 Clash/Mihomo 链接
 sing-box     → 用 sing-box 链接
 ```
@@ -170,7 +177,25 @@ free-auto 组合订阅
 http-meta-speed-filter 脚本处理
 ```
 
-## 七、排错命令
+## 七、本机测试订阅端点
+
+如果客户端提示 404，先在 VPS 本机测试：
+
+```bash
+cd /opt/substore-free-node
+./scripts/test-subscriptions.sh
+```
+
+如果本机测试通过，但 v2rayN / Clash 仍然 404，通常是下面原因：
+
+```text
+1. 客户端里复制了旧链接 /V2Ray%20URI
+2. 客户端链接漏了随机后端路径
+3. Cloudflare Tunnel 的 Public Hostname 没有指向 http://localhost:3001
+4. tunnel 配置改了但没有 sudo systemctl restart cloudflared
+```
+
+## 八、排错命令
 
 查看 Sub-Store 是否运行：
 
