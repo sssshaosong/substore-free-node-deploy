@@ -32,12 +32,13 @@ sudo bash install.sh
 
 ```text
 Ready subscription URLs:
-v2rayN      : https://sub.example.com/后端路径/share/col/free-auto/V2Ray%20URI?includeUnsupportedProxy=true
+v2rayN      : https://sub.example.com/后端路径/share/col/free-auto/V2Ray?includeUnsupportedProxy=true
+URI raw     : https://sub.example.com/后端路径/share/col/free-auto/URI?includeUnsupportedProxy=true
 Clash/Mihomo: https://sub.example.com/后端路径/share/col/free-auto/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true
 sing-box    : https://sub.example.com/后端路径/share/col/free-auto/sing-box?includeUnsupportedProxy=true
 ```
 
-你复制对应客户端的链接即可，不需要再手动添加 sources，也不需要手动粘贴脚本。
+你复制对应客户端的链接即可，不需要再手动添加 sources，也不需要手动粘贴脚本。v2rayN 优先用 `V2Ray` 这个链接，不要用旧版里的 `V2Ray%20URI`。
 
 ## 常用安装参数
 
@@ -153,6 +154,13 @@ cd /opt/substore-free-node
 ./scripts/bootstrap-substore.sh
 ```
 
+本机测试订阅端点：
+
+```bash
+cd /opt/substore-free-node
+./scripts/test-subscriptions.sh
+```
+
 更新容器和配置：
 
 ```bash
@@ -170,7 +178,7 @@ docker compose logs -f --tail=100
 ## 客户端选择
 
 ```text
-v2rayN       -> 使用 show-info.sh 输出的 v2rayN 链接
+v2rayN       -> 使用 show-info.sh 输出的 v2rayN 链接，也就是 /V2Ray
 Clash/Mihomo -> 使用 show-info.sh 输出的 Clash/Mihomo 链接
 sing-box     -> 使用 show-info.sh 输出的 sing-box 链接
 ```
