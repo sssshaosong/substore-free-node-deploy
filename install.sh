@@ -3,11 +3,22 @@ set -Eeuo pipefail
 
 APP_DIR="${APP_DIR:-/opt/substore-free-node}"
 PORT="${PORT:-3001}"
-BIND_IP="${BIND_IP:-0.0.0.0}"
+USE_TUNNEL="${USE_TUNNEL:-0}"
+NO_PUBLIC_IP="${NO_PUBLIC_IP:-0}"
+DOMAIN="${DOMAIN:-}"
+PUBLIC_SCHEME="${PUBLIC_SCHEME:-https}"
 IMAGE="${IMAGE:-xream/sub-store:http-meta}"
 CONTAINER_NAME="${CONTAINER_NAME:-sub-store}"
 SKIP_PULL="${SKIP_PULL:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -z "${BIND_IP+x}" ]; then
+  if [ "$USE_TUNNEL" = "1" ] || [ "$NO_PUBLIC_IP" = "1" ]; then
+    BIND_IP="127.0.0.1"
+  else
+    BIND_IP="0.0.0.0"
+  fi
+fi
 
 log() {
   printf '[%s] %s\n' "$1" "$2"
@@ -182,6 +193,10 @@ write_runtime_files() {
 APP_DIR=$APP_DIR
 PORT=$PORT
 BIND_IP=$BIND_IP
+USE_TUNNEL=$USE_TUNNEL
+NO_PUBLIC_IP=$NO_PUBLIC_IP
+DOMAIN=$DOMAIN
+PUBLIC_SCHEME=$PUBLIC_SCHEME
 IMAGE=$IMAGE
 CONTAINER_NAME=$CONTAINER_NAME
 BACKEND_PATH=$BACKEND_PATH
@@ -208,24 +223,41 @@ YAMLEOF
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./.env
-if command -v curl >/dev/null 2>&1; then
-  IP="$(curl -4 -fsS https://api.ipify.org 2>/dev/null || true)"
+
+if [ -n "${DOMAIN:-}" ]; then
+  FRONTEND_URL="${PUBLIC_SCHEME}://${DOMAIN}"
+  BACKEND_URL="${PUBLIC_SCHEME}://${DOMAIN}/${BACKEND_PATH}"
+  UI_URL="${PUBLIC_SCHEME}://${DOMAIN}?api=${PUBLIC_SCHEME}://${DOMAIN}/${BACKEND_PATH}"
+elif [ "${NO_PUBLIC_IP:-0}" = "1" ] || [ "${USE_TUNNEL:-0}" = "1" ] || [ "${BIND_IP:-}" = "127.0.0.1" ]; then
+  FRONTEND_URL="http://127.0.0.1:${PORT}"
+  BACKEND_URL="http://127.0.0.1:${PORT}/${BACKEND_PATH}"
+  UI_URL="http://127.0.0.1:${PORT}?api=http://127.0.0.1:${PORT}/${BACKEND_PATH}"
+else
+  if command -v curl >/dev/null 2>&1; then
+    IP="$(curl -4 -fsS https://api.ipify.org 2>/dev/null || true)"
+  fi
+  if [ -z "${IP:-}" ]; then
+    IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  if [ -z "${IP:-}" ]; then
+    IP="YOUR_SERVER_IP"
+  fi
+  FRONTEND_URL="http://${IP}:${PORT}"
+  BACKEND_URL="http://${IP}:${PORT}/${BACKEND_PATH}"
+  UI_URL="http://${IP}:${PORT}?api=http://${IP}:${PORT}/${BACKEND_PATH}"
 fi
-if [ -z "${IP:-}" ]; then
-  IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-fi
-if [ -z "${IP:-}" ]; then
-  IP="YOUR_SERVER_IP"
-fi
-echo "Sub-Store frontend: http://${IP}:${PORT}"
-echo "Sub-Store backend : http://${IP}:${PORT}/${BACKEND_PATH}"
-echo "One-line UI URL   : http://${IP}:${PORT}?api=http://${IP}:${PORT}/${BACKEND_PATH}"
+
+echo "Sub-Store frontend: ${FRONTEND_URL}"
+echo "Sub-Store backend : ${BACKEND_URL}"
+echo "One-line UI URL   : ${UI_URL}"
 echo
+echo "Bind address      : ${BIND_IP}:${PORT} -> container 3001"
 echo "Sources file      : ${APP_DIR}/sources.txt"
 echo "Speed script      : ${APP_DIR}/operators/02_httpmeta_speed_filter.js"
 echo
-echo "Use this to view sources: cat ${APP_DIR}/sources.txt"
-echo "Use this to view script : cat ${APP_DIR}/operators/02_httpmeta_speed_filter.js"
+if [ -z "${DOMAIN:-}" ] && { [ "${NO_PUBLIC_IP:-0}" = "1" ] || [ "${USE_TUNNEL:-0}" = "1" ] || [ "${BIND_IP:-}" = "127.0.0.1" ]; }; then
+  echo "Public IP output is disabled/local-only. Use a tunnel, reverse proxy, or SSH port forwarding to access it remotely."
+fi
 INFOEOF
   chmod +x "$APP_DIR/show-info.sh"
 
@@ -276,6 +308,7 @@ check_container_conflict() {
 print_plan() {
   log "PLAN" "APP_DIR=${APP_DIR}"
   log "PLAN" "PORT=${PORT}, BIND_IP=${BIND_IP}, CONTAINER_NAME=${CONTAINER_NAME}"
+  log "PLAN" "USE_TUNNEL=${USE_TUNNEL}, NO_PUBLIC_IP=${NO_PUBLIC_IP}, DOMAIN=${DOMAIN:-none}"
   log "PLAN" "IMAGE=${IMAGE}"
   if [ "$SKIP_PULL" = "1" ]; then
     log "PLAN" "SKIP_PULL=1, image pull will be skipped."
