@@ -22,18 +22,9 @@ if [ -z "${BIND_IP+x}" ]; then
   fi
 fi
 
-log() {
-  printf '[%s] %s\n' "$1" "$2"
-}
-
-die() {
-  printf '[ERROR] %s\n' "$*" >&2
-  exit 1
-}
-
-has_cmd() {
-  command -v "$1" >/dev/null 2>&1
-}
+log() { printf '[%s] %s\n' "$1" "$2"; }
+die() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 run_compose() {
   if docker compose version >/dev/null 2>&1; then
@@ -74,7 +65,6 @@ start_docker_service() {
     log "1/7" "Docker daemon already running."
     return 0
   fi
-
   log "1/7" "Starting Docker daemon..."
   if has_cmd systemctl; then
     systemctl enable docker >/dev/null 2>&1 || true
@@ -83,14 +73,12 @@ start_docker_service() {
   if has_cmd service; then
     service docker start >/dev/null 2>&1 || true
   fi
-
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     if docker info >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
   done
-
   die "Docker is installed but the daemon is not running. Run: systemctl status docker"
 }
 
@@ -100,7 +88,6 @@ ensure_docker() {
     start_docker_service
     return 0
   fi
-
   log "1/7" "Docker missing, installing Docker..."
   ensure_curl
   curl -fsSL https://get.docker.com | sh
@@ -118,7 +105,6 @@ install_compose_standalone() {
     armv7l) arch="armv7" ;;
     *) die "Unsupported CPU architecture for Docker Compose: $(uname -m)" ;;
   esac
-
   url="https://github.com/docker/compose/releases/latest/download/docker-compose-${os}-${arch}"
   curl -fL "$url" -o /usr/local/bin/docker-compose
   chmod +x /usr/local/bin/docker-compose
@@ -133,7 +119,6 @@ ensure_compose() {
     log "2/7" "Legacy docker-compose already installed: $(docker-compose --version 2>/dev/null || true)"
     return 0
   fi
-
   log "2/7" "Docker exists but Compose is missing, installing Compose..."
   if has_cmd apt-get; then
     apt-get update -y
@@ -143,18 +128,14 @@ ensure_compose() {
   elif has_cmd yum; then
     yum install -y docker-compose-plugin || true
   fi
-
   if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
     return 0
   fi
-
   log "2/7" "Package manager did not provide Compose, installing standalone docker-compose..."
   install_compose_standalone
-
   if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
     return 0
   fi
-
   die "Failed to install Docker Compose."
 }
 
@@ -181,13 +162,16 @@ copy_project_files() {
   [ -f "$SCRIPT_DIR/operators/01_fetch_today_clean.js" ] || die "Missing operators/01_fetch_today_clean.js."
   [ -f "$SCRIPT_DIR/operators/02_httpmeta_speed_filter.js" ] || die "Missing operators/02_httpmeta_speed_filter.js."
   [ -f "$SCRIPT_DIR/scripts/bootstrap-substore.sh" ] || die "Missing scripts/bootstrap-substore.sh."
-
   mkdir -p "$APP_DIR/data" "$APP_DIR/operators" "$APP_DIR/scripts"
   cp -f "$SCRIPT_DIR/sources.txt" "$APP_DIR/sources.txt"
   cp -f "$SCRIPT_DIR/operators/01_fetch_today_clean.js" "$APP_DIR/operators/01_fetch_today_clean.js"
   cp -f "$SCRIPT_DIR/operators/02_httpmeta_speed_filter.js" "$APP_DIR/operators/02_httpmeta_speed_filter.js"
   cp -f "$SCRIPT_DIR/scripts/bootstrap-substore.sh" "$APP_DIR/scripts/bootstrap-substore.sh"
   chmod +x "$APP_DIR/scripts/bootstrap-substore.sh"
+  if [ -f "$SCRIPT_DIR/scripts/test-subscriptions.sh" ]; then
+    cp -f "$SCRIPT_DIR/scripts/test-subscriptions.sh" "$APP_DIR/scripts/test-subscriptions.sh"
+    chmod +x "$APP_DIR/scripts/test-subscriptions.sh"
+  fi
 }
 
 load_existing_backend_path() {
@@ -238,7 +222,6 @@ YAMLEOF
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./.env
-
 COLLECTION_NAME="${COLLECTION_NAME:-free-auto}"
 
 if [ -n "${DOMAIN:-}" ]; then
@@ -264,7 +247,8 @@ else
   UI_URL="http://${IP}:${PORT}?api=http://${IP}:${PORT}/${BACKEND_PATH}"
 fi
 
-V2RAYN_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/V2Ray%20URI?includeUnsupportedProxy=true"
+V2RAYN_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/V2Ray?includeUnsupportedProxy=true"
+URI_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/URI?includeUnsupportedProxy=true"
 CLASH_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true"
 SINGBOX_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/sing-box?includeUnsupportedProxy=true"
 
@@ -274,6 +258,7 @@ echo "One-line UI URL   : ${UI_URL}"
 echo
 echo "Ready subscription URLs:"
 echo "v2rayN      : ${V2RAYN_URL}"
+echo "URI raw     : ${URI_URL}"
 echo "Clash/Mihomo: ${CLASH_URL}"
 echo "sing-box    : ${SINGBOX_URL}"
 echo
