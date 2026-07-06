@@ -53,7 +53,6 @@ install_packages() {
 
 ensure_curl() {
   if has_cmd curl; then
-    log "PRE" "curl already installed."
     return 0
   fi
   log "PRE" "curl missing, installing curl and ca-certificates..."
@@ -133,10 +132,6 @@ ensure_compose() {
   fi
   log "2/7" "Package manager did not provide Compose, installing standalone docker-compose..."
   install_compose_standalone
-  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
-    return 0
-  fi
-  die "Failed to install Docker Compose."
 }
 
 generate_backend_path() {
@@ -151,10 +146,14 @@ generate_backend_path() {
 
 validate_collection_name() {
   case "$COLLECTION_NAME" in
-    *[!A-Za-z0-9._-]*|'')
-      die "COLLECTION_NAME must only contain letters, numbers, dot, underscore, and dash. Current: ${COLLECTION_NAME}"
-      ;;
+    *[!A-Za-z0-9._-]*|'') die "COLLECTION_NAME must only contain letters, numbers, dot, underscore, and dash. Current: ${COLLECTION_NAME}" ;;
   esac
+}
+
+load_existing_backend_path() {
+  if [ -f "$APP_DIR/.env" ]; then
+    grep '^BACKEND_PATH=' "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- || true
+  fi
 }
 
 copy_project_files() {
@@ -171,12 +170,6 @@ copy_project_files() {
   if [ -f "$SCRIPT_DIR/scripts/test-subscriptions.sh" ]; then
     cp -f "$SCRIPT_DIR/scripts/test-subscriptions.sh" "$APP_DIR/scripts/test-subscriptions.sh"
     chmod +x "$APP_DIR/scripts/test-subscriptions.sh"
-  fi
-}
-
-load_existing_backend_path() {
-  if [ -f "$APP_DIR/.env" ]; then
-    grep '^BACKEND_PATH=' "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- || true
   fi
 }
 
@@ -247,10 +240,11 @@ else
   UI_URL="http://${IP}:${PORT}?api=http://${IP}:${PORT}/${BACKEND_PATH}"
 fi
 
-V2RAYN_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/V2Ray?includeUnsupportedProxy=true"
-URI_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/URI?includeUnsupportedProxy=true"
-CLASH_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true"
-SINGBOX_URL="${BACKEND_URL}/share/col/${COLLECTION_NAME}/sing-box?includeUnsupportedProxy=true"
+# Sub-Store uses the random backend path for /api, but subscription share routes are served from the root frontend path.
+V2RAYN_URL="${FRONTEND_URL}/share/col/${COLLECTION_NAME}/V2Ray?includeUnsupportedProxy=true"
+URI_URL="${FRONTEND_URL}/share/col/${COLLECTION_NAME}/URI?includeUnsupportedProxy=true"
+CLASH_URL="${FRONTEND_URL}/share/col/${COLLECTION_NAME}/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true"
+SINGBOX_URL="${FRONTEND_URL}/share/col/${COLLECTION_NAME}/sing-box?includeUnsupportedProxy=true"
 
 echo "Sub-Store frontend: ${FRONTEND_URL}"
 echo "Sub-Store backend : ${BACKEND_URL}"
