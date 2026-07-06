@@ -70,7 +70,6 @@ BOOTSTRAP_REPLACE_PRESET="$BOOTSTRAP_REPLACE_PRESET" \
 python3 <<'PY'
 import json
 import os
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -100,46 +99,84 @@ def request(method, path, data=None, allow_404=False):
         raw = e.read().decode('utf-8', errors='replace')
         if allow_404 and e.code == 404:
             return e.code, raw
-        raise RuntimeError(f'{method} {url} failed: HTTP {e.code}: {raw[:500]}')
+        raise RuntimeError(f'{method} {url} failed: HTTP {e.code}: {raw[:800]}')
     except Exception as e:
         raise RuntimeError(f'{method} {url} failed: {e}')
 
 
+def request_json(method, path, data=None):
+    status, raw = request(method, path, data=data)
+    try:
+        return json.loads(raw)
+    except Exception:
+        raise RuntimeError(f'{method} {base_url + path} did not return JSON: {raw[:800]}')
+
+
 def wait_backend():
     last = None
-    for _ in range(60):
+    for _ in range(90):
         try:
-            request('GET', '/api/subs', allow_404=True)
-            return
+            obj = request_json('GET', '/api/subs')
+            if isinstance(obj, dict) and obj.get('status') == 'success':
+                return
         except Exception as e:
             last = e
-            time.sleep(1)
+        time.sleep(1)
     raise RuntimeError(f'Sub-Store backend not ready: {last}')
 
 
-def exists(path):
-    status, _ = request('GET', path, allow_404=True)
-    return status == 200
+def extract_names(api_obj):
+    data = api_obj.get('data') if isinstance(api_obj, dict) else api_obj
+    names = set()
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and item.get('name'):
+                names.add(str(item['name']))
+    elif isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, dict) and value.get('name'):
+                names.add(str(value['name']))
+            elif isinstance(key, str):
+                names.add(key)
+    return names
 
 
-def post_or_patch(kind, name, payload):
+def get_existing_names():
+    subs = extract_names(request_json('GET', '/api/subs'))
+    cols = extract_names(request_json('GET', '/api/collections'))
+    return subs, cols
+
+
+def create_or_update(kind, existing_names, name, payload):
     quoted = urllib.parse.quote(name, safe='')
     if kind == 'sub':
-        exists_path = f'/api/sub/{quoted}'
         create_path = '/api/subs'
-        update_path = exists_path
+        update_path = f'/api/sub/{quoted}'
     elif kind == 'collection':
-        exists_path = f'/api/collection/{quoted}'
         create_path = '/api/collections'
-        update_path = exists_path
+        update_path = f'/api/collection/{quoted}'
     else:
         raise ValueError(kind)
 
-    if exists(exists_path):
+    # Do not probe /api/sub/:name for missing subscriptions. Some Sub-Store
+    # builds return HTTP 500 for that route when the item is absent.
+    if name in existing_names:
         request('PATCH', update_path, payload)
         return 'updated'
-    request('POST', create_path, payload)
-    return 'created'
+
+    try:
+        request('POST', create_path, payload)
+        existing_names.add(name)
+        return 'created'
+    except RuntimeError as e:
+        # Race-safe fallback: if another run created it after we listed names,
+        # patch it instead of failing the whole bootstrap.
+        msg = str(e)
+        if 'DUPLICATE_KEY' in msg or 'already exists' in msg:
+            request('PATCH', update_path, payload)
+            existing_names.add(name)
+            return 'updated'
+        raise
 
 
 def read_sources():
@@ -169,14 +206,15 @@ def source_display_name(index, url):
 
 
 wait_backend()
+existing_subs, existing_cols = get_existing_names()
 sources = read_sources()
 script_content = speed_script.read_text(encoding='utf-8')
 sub_names = []
 created = updated = 0
 
 if replace_preset:
-    # Replace only the preset names managed by this project, not unrelated user configs.
-    # We do not delete anything here because some users may have already referenced these names manually.
+    # Reserved for future destructive reset logic. Current behavior is safe:
+    # update this project's preset entries without deleting unrelated user data.
     pass
 
 for i, url in enumerate(sources, 1):
@@ -190,7 +228,7 @@ for i, url in enumerate(sources, 1):
         'ignoreFailedRemoteSub': 'fallbackQuiet',
         'process': [],
     }
-    action = post_or_patch('sub', name, sub)
+    action = create_or_update('sub', existing_subs, name, sub)
     if action == 'created':
         created += 1
     else:
@@ -213,7 +251,7 @@ collection = {
         }
     ],
 }
-col_action = post_or_patch('collection', collection_name, collection)
+col_action = create_or_update('collection', existing_cols, collection_name, collection)
 
 print(f'Subscriptions: created={created}, updated={updated}, total={len(sub_names)}')
 print(f'Collection {collection_name}: {col_action}')
