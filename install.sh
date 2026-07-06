@@ -5,6 +5,8 @@ APP_DIR="${APP_DIR:-/opt/substore-free-node}"
 PORT="${PORT:-3001}"
 BIND_IP="${BIND_IP:-0.0.0.0}"
 IMAGE="${IMAGE:-xream/sub-store:http-meta}"
+CONTAINER_NAME="${CONTAINER_NAME:-sub-store}"
+SKIP_PULL="${SKIP_PULL:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() {
@@ -16,35 +18,56 @@ die() {
   exit 1
 }
 
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
 run_compose() {
   if docker compose version >/dev/null 2>&1; then
     docker compose "$@"
-  elif command -v docker-compose >/dev/null 2>&1; then
+  elif has_cmd docker-compose; then
     docker-compose "$@"
   else
     die "Docker Compose is not available."
   fi
 }
 
-install_basic_tools() {
-  if command -v apt-get >/dev/null 2>&1; then
+install_packages() {
+  if has_cmd apt-get; then
     apt-get update -y
-    apt-get install -y curl ca-certificates openssl tar gzip
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl ca-certificates openssl tar gzip
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl ca-certificates openssl tar gzip
-  elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache curl ca-certificates openssl tar gzip
+    apt-get install -y "$@"
+  elif has_cmd dnf; then
+    dnf install -y "$@"
+  elif has_cmd yum; then
+    yum install -y "$@"
+  elif has_cmd apk; then
+    apk add --no-cache "$@"
+  else
+    die "No supported package manager found. Please install missing packages manually: $*"
   fi
 }
 
+ensure_curl() {
+  if has_cmd curl; then
+    log "PRE" "curl already installed."
+    return 0
+  fi
+  log "PRE" "curl missing, installing curl and ca-certificates..."
+  install_packages curl ca-certificates
+}
+
 start_docker_service() {
-  if command -v systemctl >/dev/null 2>&1; then
+  if docker info >/dev/null 2>&1; then
+    log "1/6" "Docker daemon already running."
+    return 0
+  fi
+
+  log "1/6" "Starting Docker daemon..."
+  if has_cmd systemctl; then
     systemctl enable docker >/dev/null 2>&1 || true
     systemctl start docker >/dev/null 2>&1 || true
   fi
-  if command -v service >/dev/null 2>&1; then
+  if has_cmd service; then
     service docker start >/dev/null 2>&1 || true
   fi
 
@@ -59,20 +82,21 @@ start_docker_service() {
 }
 
 ensure_docker() {
-  if command -v docker >/dev/null 2>&1; then
-    log "1/6" "Docker already installed, checking daemon..."
+  if has_cmd docker; then
+    log "1/6" "Docker already installed: $(docker --version 2>/dev/null || true)"
     start_docker_service
     return 0
   fi
 
-  log "1/6" "Installing Docker..."
-  install_basic_tools
+  log "1/6" "Docker missing, installing Docker..."
+  ensure_curl
   curl -fsSL https://get.docker.com | sh
   start_docker_service
 }
 
 install_compose_standalone() {
   local arch os url
+  ensure_curl
   os="$(uname -s | tr '[:upper:]' '[:lower:]')"
   arch="$(uname -m)"
   case "$arch" in
@@ -89,33 +113,32 @@ install_compose_standalone() {
 
 ensure_compose() {
   if docker compose version >/dev/null 2>&1; then
-    log "2/6" "Docker Compose v2 plugin already installed."
+    log "2/6" "Docker Compose v2 already installed: $(docker compose version 2>/dev/null || true)"
     return 0
   fi
-  if command -v docker-compose >/dev/null 2>&1; then
-    log "2/6" "Legacy docker-compose already installed."
+  if has_cmd docker-compose; then
+    log "2/6" "Legacy docker-compose already installed: $(docker-compose --version 2>/dev/null || true)"
     return 0
   fi
 
   log "2/6" "Docker exists but Compose is missing, installing Compose..."
-  install_basic_tools
-
-  if command -v apt-get >/dev/null 2>&1; then
+  if has_cmd apt-get; then
+    apt-get update -y
     apt-get install -y docker-compose-plugin || true
-  elif command -v dnf >/dev/null 2>&1; then
+  elif has_cmd dnf; then
     dnf install -y docker-compose-plugin || true
-  elif command -v yum >/dev/null 2>&1; then
+  elif has_cmd yum; then
     yum install -y docker-compose-plugin || true
   fi
 
-  if docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; then
+  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
     return 0
   fi
 
-  log "2/6" "Package manager did not provide Compose, installing standalone binary..."
+  log "2/6" "Package manager did not provide Compose, installing standalone docker-compose..."
   install_compose_standalone
 
-  if docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; then
+  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
     return 0
   fi
 
@@ -123,10 +146,12 @@ ensure_compose() {
 }
 
 generate_backend_path() {
-  if command -v openssl >/dev/null 2>&1; then
+  if has_cmd openssl; then
     openssl rand -hex 12
-  else
+  elif has_cmd sha256sum; then
     date +%s%N | sha256sum | awk '{print substr($1,1,24)}'
+  else
+    date +%s%N | awk '{print substr($1,1,24)}'
   fi
 }
 
@@ -141,12 +166,14 @@ copy_project_files() {
   cp -f "$SCRIPT_DIR/operators/02_httpmeta_speed_filter.js" "$APP_DIR/operators/02_httpmeta_speed_filter.js"
 }
 
-write_runtime_files() {
+load_existing_backend_path() {
   if [ -f "$APP_DIR/.env" ]; then
-    # shellcheck disable=SC1091
-    . "$APP_DIR/.env" || true
-    BACKEND_PATH="${BACKEND_PATH:-}"
+    grep '^BACKEND_PATH=' "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- || true
   fi
+}
+
+write_runtime_files() {
+  BACKEND_PATH="${BACKEND_PATH:-$(load_existing_backend_path)}"
   if [ -z "${BACKEND_PATH:-}" ]; then
     BACKEND_PATH="$(generate_backend_path)"
   fi
@@ -156,6 +183,7 @@ APP_DIR=$APP_DIR
 PORT=$PORT
 BIND_IP=$BIND_IP
 IMAGE=$IMAGE
+CONTAINER_NAME=$CONTAINER_NAME
 BACKEND_PATH=$BACKEND_PATH
 ENVEOF
 
@@ -163,16 +191,16 @@ ENVEOF
 services:
   sub-store:
     image: ${IMAGE}
-    container_name: sub-store
+    container_name: ${CONTAINER_NAME}
     restart: unless-stopped
     ports:
       - "${BIND_IP}:${PORT}:3001"
     volumes:
       - ./data:/opt/app/data
     environment:
-      - SUB_STORE_FRONTEND_BACKEND_PATH=/${BACKEND_PATH}
-      - SUB_STORE_BACKEND_SYNC_CRON=0 */6 * * *
-      - SUB_STORE_PRODUCE_CRON=0 */6 * * *
+      SUB_STORE_FRONTEND_BACKEND_PATH: "/${BACKEND_PATH}"
+      SUB_STORE_BACKEND_SYNC_CRON: "0 */6 * * *"
+      SUB_STORE_PRODUCE_CRON: "0 */6 * * *"
 YAMLEOF
 
   cat > "$APP_DIR/show-info.sh" <<'INFOEOF'
@@ -180,7 +208,15 @@ YAMLEOF
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./.env
-IP="$(curl -4 -fsS https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+if command -v curl >/dev/null 2>&1; then
+  IP="$(curl -4 -fsS https://api.ipify.org 2>/dev/null || true)"
+fi
+if [ -z "${IP:-}" ]; then
+  IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+fi
+if [ -z "${IP:-}" ]; then
+  IP="YOUR_SERVER_IP"
+fi
 echo "Sub-Store frontend: http://${IP}:${PORT}"
 echo "Sub-Store backend : http://${IP}:${PORT}/${BACKEND_PATH}"
 echo "One-line UI URL   : http://${IP}:${PORT}?api=http://${IP}:${PORT}/${BACKEND_PATH}"
@@ -226,22 +262,48 @@ UNINSTALLEOF
   chmod +x "$APP_DIR/uninstall.sh"
 }
 
+check_container_conflict() {
+  if docker ps -a --format '{{.Names}}' | grep -Fxq "$CONTAINER_NAME"; then
+    local working_dir
+    working_dir="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$CONTAINER_NAME" 2>/dev/null || true)"
+    if [ -n "$working_dir" ] && [ "$working_dir" != "<no value>" ] && [ "$working_dir" != "$APP_DIR" ]; then
+      die "Container name ${CONTAINER_NAME} is already used by another compose project: ${working_dir}. Use CONTAINER_NAME=sub-store2 or remove the old container."
+    fi
+    log "PRE" "Existing container ${CONTAINER_NAME} found. It will be reused/updated, not deleted."
+  fi
+}
+
+print_plan() {
+  log "PLAN" "APP_DIR=${APP_DIR}"
+  log "PLAN" "PORT=${PORT}, BIND_IP=${BIND_IP}, CONTAINER_NAME=${CONTAINER_NAME}"
+  log "PLAN" "IMAGE=${IMAGE}"
+  if [ "$SKIP_PULL" = "1" ]; then
+    log "PLAN" "SKIP_PULL=1, image pull will be skipped."
+  fi
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   die "Please run as root: sudo bash install.sh"
 fi
 
+print_plan
 ensure_docker
 ensure_compose
+check_container_conflict
 
 log "3/6" "Copying project files to ${APP_DIR}..."
 copy_project_files
 write_runtime_files
 
 cd "$APP_DIR"
-log "4/6" "Pulling image: ${IMAGE}"
-run_compose pull
+if [ "$SKIP_PULL" = "1" ]; then
+  log "4/6" "Skipping image pull because SKIP_PULL=1."
+else
+  log "4/6" "Pulling image: ${IMAGE}"
+  run_compose pull
+fi
 
-log "5/6" "Starting Sub-Store..."
+log "5/6" "Starting or updating Sub-Store..."
 run_compose up -d
 
 log "6/6" "Done."
