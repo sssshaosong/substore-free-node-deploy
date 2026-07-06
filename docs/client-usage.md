@@ -1,8 +1,8 @@
-# 订阅地址生成与客户端使用
+# 订阅地址与客户端使用
 
-本文说明部署完成后，如何从 Sub-Store 生成订阅地址，并导入 v2rayN、Clash Verge / Mihomo、sing-box 等客户端。
+现在安装脚本会自动写入内置节点源、自动创建组合订阅、自动挂载测速脚本。正常情况下你不需要再手动添加 `sources.txt`，也不需要手动粘贴 operator 脚本。
 
-## 一、先确认你的访问地址
+## 一、查看现成订阅地址
 
 安装完成后执行：
 
@@ -14,68 +14,57 @@ cd /opt/substore-free-node
 你会看到类似：
 
 ```text
-Sub-Store frontend: https://sub.example.com
-Sub-Store backend : https://sub.example.com/xxxxxxxxxxxxxxxxxxxxxxxx
-One-line UI URL   : https://sub.example.com?api=https://sub.example.com/xxxxxxxxxxxxxxxxxxxxxxxx
+Ready subscription URLs:
+v2rayN      : https://sub.example.com/后端路径/share/col/free-auto/V2Ray%20URI?includeUnsupportedProxy=true
+Clash/Mihomo: https://sub.example.com/后端路径/share/col/free-auto/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true
+sing-box    : https://sub.example.com/后端路径/share/col/free-auto/sing-box?includeUnsupportedProxy=true
 ```
 
-打开最后一行 `One-line UI URL`。
+直接复制对应客户端的链接。
 
-如果你没有域名，可能是：
+注意：订阅地址必须包含随机后端路径，也就是：
 
 ```text
-http://你的VPS_IP:3001?api=http://你的VPS_IP:3001/xxxxxxxxxxxxxxxxxxxxxxxx
+https://sub.example.com/随机后端路径/share/col/free-auto/...
 ```
 
-如果你用了 Tunnel 或 `NO_PUBLIC_IP=1`，不要用 VPS IP 访问，应该用域名或本地转发后的地址。
-
-## 二、在 Sub-Store 里创建组合订阅
-
-进入 Sub-Store 网页后：
+不要写成：
 
 ```text
-组合订阅 / Collections
-→ 新建
-→ 名称，例如：free-auto
-→ 添加订阅源
-→ 把 /opt/substore-free-node/sources.txt 里的链接逐个添加进去
+https://sub.example.com/share/col/free-auto/...
 ```
 
-查看源列表：
+否则大概率会 404。
+
+## 二、重新生成内置配置
+
+如果你修改了 `sources.txt` 或测速脚本，执行：
 
 ```bash
-cat /opt/substore-free-node/sources.txt
+cd /opt/substore-free-node
+./scripts/bootstrap-substore.sh
+./show-info.sh
 ```
 
-然后添加脚本处理：
+这个脚本会自动：
 
 ```text
-节点操作 / 脚本处理 / Operator
-→ 新建或粘贴脚本
-→ 使用 /opt/substore-free-node/operators/02_httpmeta_speed_filter.js
-→ 保存
-→ 预览
+读取 /opt/substore-free-node/sources.txt
+创建/更新 source-001、source-002 等订阅源
+创建/更新 free-auto 组合订阅
+把 02_httpmeta_speed_filter.js 挂到 free-auto 上
+输出可用订阅链接
 ```
 
-查看测速脚本：
-
-```bash
-cat /opt/substore-free-node/operators/02_httpmeta_speed_filter.js
-```
-
-预览能看到节点后，再点分享、导出或复制订阅链接。
-
-> 不建议自己手写 Sub-Store 的 API 路径。不同版本 UI 生成的分享链接可能略有不同，最稳妥是直接在 Sub-Store 页面点“分享/复制链接”。
+不会清空其他不相关的订阅配置。
 
 ## 三、v2rayN 使用方式
 
-给 v2rayN 用时，在 Sub-Store 导出类型选择：
+复制 `show-info.sh` 输出的：
 
 ```text
-V2Ray / V2RayN / URI / Base64
+v2rayN: .../share/col/free-auto/V2Ray%20URI?includeUnsupportedProxy=true
 ```
-
-不要选择 Clash.Meta，也不要选择 sing-box。
 
 然后打开 v2rayN：
 
@@ -89,7 +78,7 @@ V2Ray / V2RayN / URI / Base64
 
 ```text
 备注：free-auto
-地址：粘贴 Sub-Store 复制出来的 v2rayN / V2Ray 订阅链接
+地址：粘贴 v2rayN 订阅链接
 ```
 
 保存后：
@@ -110,45 +99,24 @@ V2Ray / V2RayN / URI / Base64
 → 自动配置系统代理
 ```
 
-如果 v2rayN 更新不到节点，通常是下面几种情况：
-
-```text
-1. 你复制的是 Clash.Meta 链接，不是 V2Ray/v2rayN 链接
-2. Sub-Store 后端地址没有配置对
-3. Cloudflare Tunnel 没有把域名转发到 localhost:3001
-4. 组合订阅预览本身就是空的
-5. 测速脚本筛选太严格，MAX_DELAY 太低
-```
-
-可以先在 Sub-Store 里临时关闭测速脚本，确认原始节点能正常输出。
-
 ## 四、Clash Verge / Mihomo 使用方式
 
-给 Clash Verge、Clash Verge Rev、Mihomo Party、OpenClash 等使用时，在 Sub-Store 导出类型选择：
+复制 `show-info.sh` 输出的：
 
 ```text
-Clash.Meta / Mihomo
+Clash/Mihomo: .../share/col/free-auto/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true
 ```
 
-然后在客户端里添加远程配置。
-
-以 Clash Verge / Clash Verge Rev 为例：
+Clash Verge / Clash Verge Rev：
 
 ```text
 Profiles / 配置
 → New / 新建
 → Remote / URL / 远程配置
-→ 粘贴 Sub-Store 复制出来的 Clash.Meta 订阅链接
+→ 粘贴 Clash/Mihomo 订阅链接
 → 保存
 → Update / 更新
 → 选中该配置
-```
-
-如果客户端需要填写名称：
-
-```text
-Name: free-auto
-URL : 你的 Clash.Meta 订阅链接
 ```
 
 OpenClash 一般是：
@@ -157,55 +125,52 @@ OpenClash 一般是：
 配置订阅
 → 添加
 → 名称：free-auto
-→ 地址：Clash.Meta 订阅链接
+→ 地址：Clash/Mihomo 订阅链接
 → 保存并更新
 ```
 
-## 五、Clash 配置文件里怎么写
+## 五、sing-box 使用方式
 
-大多数 Clash 客户端不需要你手动把节点写进 `config.yaml`，直接添加远程订阅 URL 更稳。
-
-如果你的客户端必须用文件方式，可以在 Sub-Store 里选择 Clash.Meta 导出，然后把生成内容保存成：
+复制 `show-info.sh` 输出的：
 
 ```text
-config.yaml
+sing-box: .../share/col/free-auto/sing-box?includeUnsupportedProxy=true
 ```
 
-再导入客户端。
+然后在 sing-box 客户端里添加远程配置或订阅 URL。
 
-但不建议长期手动保存文件，因为手动文件不会自动跟着 6 小时定时更新。推荐使用远程订阅 URL。
-
-## 六、sing-box 使用方式
-
-给 sing-box / SFI / SFA / NekoBox sing-box 内核使用时，在 Sub-Store 导出类型选择：
+不同客户端界面不一样，核心原则是：
 
 ```text
-sing-box
+v2rayN       → 用 v2rayN 链接
+Clash/Mihomo → 用 Clash/Mihomo 链接
+sing-box     → 用 sing-box 链接
 ```
 
-然后在客户端里添加远程配置或订阅 URL。
+## 六、如果想进入 Sub-Store 面板
 
-不同 sing-box 客户端界面不一样，核心原则是：
+执行：
+
+```bash
+cd /opt/substore-free-node
+./show-info.sh
+```
+
+打开：
 
 ```text
-v2rayN       → 选择 V2Ray/v2rayN 类型链接
-Clash/Mihomo → 选择 Clash.Meta/Mihomo 类型链接
-sing-box     → 选择 sing-box 类型链接
+One-line UI URL
 ```
 
-## 七、推荐命名
-
-可以创建多个导出链接：
+里面可以看到已经自动创建好的：
 
 ```text
-free-auto-v2rayn      → 给 v2rayN 使用
-free-auto-clash       → 给 Clash.Meta / Mihomo 使用
-free-auto-singbox     → 给 sing-box 使用
+source-001、source-002、source-003 ...
+free-auto 组合订阅
+http-meta-speed-filter 脚本处理
 ```
 
-这样不同客户端互不影响，出问题时也方便排查。
-
-## 八、排错命令
+## 七、排错命令
 
 查看 Sub-Store 是否运行：
 
