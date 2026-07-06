@@ -139,6 +139,20 @@ curl 已安装
 5. 预览时会自动测速，保留 `MAX_DELAY` 以下的节点，默认是 800ms。
 6. 分享/导出订阅时，v2rayN 建议选择 V2Ray / v2rayN 类型；Clash Verge / Mihomo 选择 Clash.Meta 类型。
 
+更详细的客户端导入教程看这里：
+
+```text
+docs/client-usage.md
+```
+
+快速判断：
+
+```text
+v2rayN       -> 复制 V2Ray / v2rayN / URI / Base64 类型链接
+Clash/Mihomo -> 复制 Clash.Meta / Mihomo 类型链接
+sing-box     -> 复制 sing-box 类型链接
+```
+
 查看源列表：
 
 ```bash
