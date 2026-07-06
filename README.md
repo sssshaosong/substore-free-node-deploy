@@ -12,7 +12,11 @@
 - 内置两个 Sub-Store 脚本：
   - `01_fetch_today_clean.js`：额外拉取当天 free-nodes 订阅并清理名字
   - `02_httpmeta_speed_filter.js`：用 http-meta 真实走代理测速，过滤延迟过高/不可用节点
-- 内置 Sub-Store 后台 cron 环境变量：每 6 小时触发一次生产/同步任务
+- 自动把 `sources.txt` 里的节点源写入 Sub-Store
+- 自动创建组合订阅 `free-auto`
+- 自动把测速过滤脚本挂到组合订阅上
+- 自动输出 v2rayN / Clash.Meta / sing-box 可用订阅地址
+- 内置 Sub-Store 后台 cron 环境变量：每 6 小时触发一次同步和生产任务
 - 安装脚本是幂等设计：Docker、Docker Compose、curl 已存在时会跳过安装，不会重复安装，也不会停止其他 Docker 容器
 - 支持域名模式、Cloudflare Tunnel 模式、无域名跳过模式
 
@@ -24,33 +28,18 @@ cd substore-free-node-deploy
 sudo bash install.sh
 ```
 
-如果你是下载 zip 包，也可以这样：
+安装完成后会直接输出：
 
-```bash
-unzip substore-free-node-deploy.zip
-cd substore-free-node-deploy
-sudo bash install.sh
+```text
+Ready subscription URLs:
+v2rayN      : https://sub.example.com/后端路径/share/col/free-auto/V2Ray%20URI?includeUnsupportedProxy=true
+Clash/Mihomo: https://sub.example.com/后端路径/share/col/free-auto/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true
+sing-box    : https://sub.example.com/后端路径/share/col/free-auto/sing-box?includeUnsupportedProxy=true
 ```
 
-可选参数：
+你复制对应客户端的链接即可，不需要再手动添加 sources，也不需要手动粘贴脚本。
 
-```bash
-sudo PORT=3001 BIND_IP=0.0.0.0 bash install.sh
-```
-
-如果你的 VPS 上 Docker 镜像已经存在，不想每次拉取镜像：
-
-```bash
-sudo SKIP_PULL=1 bash install.sh
-```
-
-如果已有同名容器 `sub-store` 被别的项目占用，可以换容器名：
-
-```bash
-sudo CONTAINER_NAME=sub-store2 PORT=3002 bash install.sh
-```
-
-## 隐藏 IP / 域名 / Tunnel 模式
+## 常用安装参数
 
 没有域名，临时测试：
 
@@ -70,10 +59,42 @@ sudo NO_PUBLIC_IP=1 bash install.sh
 sudo USE_TUNNEL=1 DOMAIN=sub.example.com bash install.sh
 ```
 
-然后在 Cloudflare Tunnel 里给已有 tunnel 增加一个 Public Hostname：
+如果你的 VPS 上 Docker 镜像已经存在，不想每次拉取镜像：
+
+```bash
+sudo SKIP_PULL=1 bash install.sh
+```
+
+如果已有同名容器 `sub-store` 被别的项目占用，可以换容器名：
+
+```bash
+sudo CONTAINER_NAME=sub-store2 PORT=3002 bash install.sh
+```
+
+如果你不想自动写入内置源和组合订阅：
+
+```bash
+sudo AUTO_BOOTSTRAP=0 bash install.sh
+```
+
+自定义组合订阅名：
+
+```bash
+sudo COLLECTION_NAME=my-free bash install.sh
+```
+
+## 隐藏 IP / 域名 / Tunnel 模式
+
+已有 Cloudflare Tunnel 时，在 Cloudflare Tunnel 里给已有 tunnel 增加一个 Public Hostname：
 
 ```text
 sub.example.com -> http://localhost:3001
+```
+
+然后执行：
+
+```bash
+sudo USE_TUNNEL=1 DOMAIN=sub.example.com bash install.sh
 ```
 
 详细步骤看这里：
@@ -89,22 +110,6 @@ DOMAIN=sub.example.com TUNNEL_NAME=你的Tunnel名称 bash scripts/cloudflare-tu
 ```
 
 这个辅助脚本只帮你创建 DNS route 并输出 ingress 配置示例，不会自动改你现有 cloudflared 配置，避免影响已有 tunnel。
-
-安装完会输出：
-
-```text
-Sub-Store frontend: http://你的IP:3001
-Sub-Store backend : http://你的IP:3001/随机后端路径
-One-line UI URL   : http://你的IP:3001?api=http://你的IP:3001/随机后端路径
-```
-
-如果你传了 `DOMAIN=sub.example.com`，输出会变成：
-
-```text
-Sub-Store frontend: https://sub.example.com
-Sub-Store backend : https://sub.example.com/随机后端路径
-One-line UI URL   : https://sub.example.com?api=https://sub.example.com/随机后端路径
-```
 
 ## 已安装环境下的行为
 
@@ -125,44 +130,55 @@ curl 已安装
 复制 sources.txt 和 operators 脚本
 保留已有 data 数据目录
 保留已有 BACKEND_PATH 后端路径
-执行 docker compose up -d 更新/启动当前项目
+启动/更新 Sub-Store
+自动写入内置源和 free-auto 组合订阅
+输出 v2rayN / Clash.Meta / sing-box 订阅地址
 ```
 
 它不会清空 `/opt/substore-free-node/data`，也不会停止其他 Docker 容器。
 
-## 使用步骤
+## 使用方式
 
-1. 打开安装脚本输出的 `One-line UI URL`。
-2. 在 Sub-Store 后端设置里确认后端已连接。
-3. 新建单条订阅或组合订阅，把 `sources.txt` 里的 URL 添加进去。
-4. 在组合订阅的节点操作里添加脚本处理，把 `operators/02_httpmeta_speed_filter.js` 粘贴进去。
-5. 预览时会自动测速，保留 `MAX_DELAY` 以下的节点，默认是 800ms。
-6. 分享/导出订阅时，v2rayN 建议选择 V2Ray / v2rayN 类型；Clash Verge / Mihomo 选择 Clash.Meta 类型。
+安装后查看订阅地址：
 
-更详细的客户端导入教程看这里：
+```bash
+cd /opt/substore-free-node
+./show-info.sh
+```
+
+重新写入/更新内置源和组合订阅：
+
+```bash
+cd /opt/substore-free-node
+./scripts/bootstrap-substore.sh
+```
+
+更新容器和配置：
+
+```bash
+cd /opt/substore-free-node
+./update.sh
+```
+
+查看日志：
+
+```bash
+cd /opt/substore-free-node
+docker compose logs -f --tail=100
+```
+
+## 客户端选择
+
+```text
+v2rayN       -> 使用 show-info.sh 输出的 v2rayN 链接
+Clash/Mihomo -> 使用 show-info.sh 输出的 Clash/Mihomo 链接
+sing-box     -> 使用 show-info.sh 输出的 sing-box 链接
+```
+
+更详细的客户端导入教程：
 
 ```text
 docs/client-usage.md
-```
-
-快速判断：
-
-```text
-v2rayN       -> 复制 V2Ray / v2rayN / URI / Base64 类型链接
-Clash/Mihomo -> 复制 Clash.Meta / Mihomo 类型链接
-sing-box     -> 复制 sing-box 类型链接
-```
-
-查看源列表：
-
-```bash
-cat /opt/substore-free-node/sources.txt
-```
-
-查看测速脚本：
-
-```bash
-cat /opt/substore-free-node/operators/02_httpmeta_speed_filter.js
 ```
 
 ## 每 6 小时自动检测说明
@@ -171,20 +187,10 @@ cat /opt/substore-free-node/operators/02_httpmeta_speed_filter.js
 
 ```yaml
 SUB_STORE_BACKEND_SYNC_CRON: "0 */6 * * *"
-SUB_STORE_PRODUCE_CRON: "0 */6 * * *"
+SUB_STORE_PRODUCE_CRON: "0 */6 * * *,collection,free-auto"
 ```
 
-Sub-Store 的定时任务只会对已配置好的订阅/产物生效。也就是说：第一次仍然需要你在网页里把源和脚本建好，后续它才会按 6 小时周期预生成/同步。
-
-## 常用命令
-
-```bash
-cd /opt/substore-free-node
-./show-info.sh
-./update.sh
-docker compose logs -f --tail=100
-./uninstall.sh
-```
+其中 `free-auto` 会随 `COLLECTION_NAME` 自动变化。
 
 ## 修改筛选条件
 
