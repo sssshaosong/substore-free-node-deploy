@@ -14,6 +14,7 @@
   - `02_httpmeta_speed_filter.js`：用 http-meta 真实走代理测速，过滤延迟过高/不可用节点
 - 内置 Sub-Store 后台 cron 环境变量：每 6 小时触发一次生产/同步任务
 - 安装脚本是幂等设计：Docker、Docker Compose、curl 已存在时会跳过安装，不会重复安装，也不会停止其他 Docker 容器
+- 支持域名模式、Cloudflare Tunnel 模式、无域名跳过模式
 
 ## 一键安装
 
@@ -49,6 +50,46 @@ sudo SKIP_PULL=1 bash install.sh
 sudo CONTAINER_NAME=sub-store2 PORT=3002 bash install.sh
 ```
 
+## 隐藏 IP / 域名 / Tunnel 模式
+
+没有域名，临时测试：
+
+```bash
+sudo bash install.sh
+```
+
+没有域名，但不想暴露 3001 到公网，只监听本机：
+
+```bash
+sudo NO_PUBLIC_IP=1 bash install.sh
+```
+
+已有 Cloudflare Tunnel，推荐这样装：
+
+```bash
+sudo USE_TUNNEL=1 DOMAIN=sub.example.com bash install.sh
+```
+
+然后在 Cloudflare Tunnel 里给已有 tunnel 增加一个 Public Hostname：
+
+```text
+sub.example.com -> http://localhost:3001
+```
+
+详细步骤看这里：
+
+```text
+docs/cloudflare-tunnel.md
+```
+
+辅助脚本：
+
+```bash
+DOMAIN=sub.example.com TUNNEL_NAME=你的Tunnel名称 bash scripts/cloudflare-tunnel-route.sh
+```
+
+这个辅助脚本只帮你创建 DNS route 并输出 ingress 配置示例，不会自动改你现有 cloudflared 配置，避免影响已有 tunnel。
+
 安装完会输出：
 
 ```text
@@ -57,7 +98,13 @@ Sub-Store backend : http://你的IP:3001/随机后端路径
 One-line UI URL   : http://你的IP:3001?api=http://你的IP:3001/随机后端路径
 ```
 
-直接打开最后一行 `One-line UI URL`。
+如果你传了 `DOMAIN=sub.example.com`，输出会变成：
+
+```text
+Sub-Store frontend: https://sub.example.com
+Sub-Store backend : https://sub.example.com/随机后端路径
+One-line UI URL   : https://sub.example.com?api=https://sub.example.com/随机后端路径
+```
 
 ## 已安装环境下的行为
 
