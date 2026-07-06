@@ -14,28 +14,24 @@ cd /opt/substore-free-node
 你会看到类似：
 
 ```text
+Sub-Store frontend: https://sub.example.com
+Sub-Store backend : https://sub.example.com/随机后端路径
+
 Ready subscription URLs:
-v2rayN      : https://sub.example.com/后端路径/share/col/free-auto/V2Ray?includeUnsupportedProxy=true
-URI raw     : https://sub.example.com/后端路径/share/col/free-auto/URI?includeUnsupportedProxy=true
-Clash/Mihomo: https://sub.example.com/后端路径/share/col/free-auto/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true
-sing-box    : https://sub.example.com/后端路径/share/col/free-auto/sing-box?includeUnsupportedProxy=true
+v2rayN      : https://sub.example.com/share/col/free-auto/V2Ray?includeUnsupportedProxy=true
+URI raw     : https://sub.example.com/share/col/free-auto/URI?includeUnsupportedProxy=true
+Clash/Mihomo: https://sub.example.com/share/col/free-auto/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true
+sing-box    : https://sub.example.com/share/col/free-auto/sing-box?includeUnsupportedProxy=true
 ```
 
-直接复制对应客户端的链接。v2rayN 优先复制 `/V2Ray` 这个链接；`URI raw` 是未 base64 的原始 URI 列表，主要用于排查。
-
-注意：订阅地址必须包含随机后端路径，也就是：
+关键区别：
 
 ```text
-https://sub.example.com/随机后端路径/share/col/free-auto/...
+/api 接口走随机后端路径： https://sub.example.com/随机后端路径/api/...
+/share 订阅链接走根路径： https://sub.example.com/share/...
 ```
 
-不要写成：
-
-```text
-https://sub.example.com/share/col/free-auto/...
-```
-
-否则大概率会 404。
+所以客户端订阅链接不要带随机后端路径。带随机后端路径时通常会返回前端 HTML 页面，v2rayN 就会显示“获取成功但导入失败”。
 
 ## 二、重新生成内置配置
 
@@ -70,6 +66,7 @@ v2rayN: .../share/col/free-auto/V2Ray?includeUnsupportedProxy=true
 不要再用旧版输出里的：
 
 ```text
+.../随机后端路径/share/col/free-auto/V2Ray...
 .../V2Ray%20URI?includeUnsupportedProxy=true
 ```
 
@@ -93,17 +90,6 @@ v2rayN: .../share/col/free-auto/V2Ray?includeUnsupportedProxy=true
 ```text
 订阅分组
 → 更新全部订阅，或者更新当前订阅
-```
-
-更新成功后：
-
-```text
-右键节点
-→ 测试服务器延迟 / 测试真实连接
-→ 选择可用节点
-→ 设为活动服务器
-→ 系统代理
-→ 自动配置系统代理
 ```
 
 ## 四、Clash Verge / Mihomo 使用方式
@@ -136,23 +122,16 @@ OpenClash 一般是：
 → 保存并更新
 ```
 
-## 五、sing-box 使用方式
+## 五、本机测试订阅端点
 
-复制 `show-info.sh` 输出的：
+如果客户端提示 404 或“获取成功但导入失败”，先在 VPS 本机测试：
 
-```text
-sing-box: .../share/col/free-auto/sing-box?includeUnsupportedProxy=true
+```bash
+cd /opt/substore-free-node
+./scripts/test-subscriptions.sh
 ```
 
-然后在 sing-box 客户端里添加远程配置或订阅 URL。
-
-不同客户端界面不一样，核心原则是：
-
-```text
-v2rayN       → 用 v2rayN 链接，也就是 /V2Ray
-Clash/Mihomo → 用 Clash/Mihomo 链接
-sing-box     → 用 sing-box 链接
-```
+正常时 `/share` 测试不应该返回 HTML。如果返回 `<!DOCTYPE html>`，说明订阅地址走错了路径。
 
 ## 六、如果想进入 Sub-Store 面板
 
@@ -177,25 +156,7 @@ free-auto 组合订阅
 http-meta-speed-filter 脚本处理
 ```
 
-## 七、本机测试订阅端点
-
-如果客户端提示 404，先在 VPS 本机测试：
-
-```bash
-cd /opt/substore-free-node
-./scripts/test-subscriptions.sh
-```
-
-如果本机测试通过，但 v2rayN / Clash 仍然 404，通常是下面原因：
-
-```text
-1. 客户端里复制了旧链接 /V2Ray%20URI
-2. 客户端链接漏了随机后端路径
-3. Cloudflare Tunnel 的 Public Hostname 没有指向 http://localhost:3001
-4. tunnel 配置改了但没有 sudo systemctl restart cloudflared
-```
-
-## 八、排错命令
+## 七、排错命令
 
 查看 Sub-Store 是否运行：
 
@@ -221,14 +182,6 @@ Cloudflare Tunnel 模式应该看到：
 ```text
 127.0.0.1:3001
 ```
-
-如果看到：
-
-```text
-0.0.0.0:3001
-```
-
-说明当前是公网监听模式，不是本机隐藏模式。
 
 检查 tunnel 配置：
 
