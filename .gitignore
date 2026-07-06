@@ -1,0 +1,9 @@
+# Runtime data
+.env
+data/
+*.log
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
