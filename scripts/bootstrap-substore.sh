@@ -4,25 +4,15 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/substore-free-node}"
 COLLECTION_NAME="${COLLECTION_NAME:-free-auto}"
 BOOTSTRAP_REPLACE_PRESET="${BOOTSTRAP_REPLACE_PRESET:-0}"
+USE_SPEED_FILTER="${USE_SPEED_FILTER:-0}"
 
-log() {
-  printf '[%s] %s\n' "$1" "$2"
-}
-
-die() {
-  printf '[ERROR] %s\n' "$*" >&2
-  exit 1
-}
-
-has_cmd() {
-  command -v "$1" >/dev/null 2>&1
-}
+log() { printf '[%s] %s\n' "$1" "$2"; }
+die() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 install_python3() {
-  if has_cmd python3; then
-    return 0
-  fi
-  log "BOOT" "python3 missing, installing python3..."
+  has_cmd python3 && return 0
+  log BOOT "python3 missing, installing python3..."
   if has_cmd apt-get; then
     apt-get update -y
     apt-get install -y python3
@@ -47,26 +37,29 @@ BACKEND_PATH="${BACKEND_PATH:-}"
 [ -n "$BACKEND_PATH" ] || die "BACKEND_PATH is empty. Run install.sh first."
 
 case "$COLLECTION_NAME" in
-  *[!A-Za-z0-9._-]*|'')
-    die "COLLECTION_NAME must only contain letters, numbers, dot, underscore, and dash. Current: ${COLLECTION_NAME}"
-    ;;
+  *[!A-Za-z0-9._-]*|'') die "COLLECTION_NAME must only contain letters, numbers, dot, underscore, and dash. Current: ${COLLECTION_NAME}" ;;
 esac
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:${PORT}/${BACKEND_PATH}}"
 SOURCES_FILE="${SOURCES_FILE:-${APP_DIR}/sources.txt}"
+FAST_SCRIPT="${FAST_SCRIPT:-${APP_DIR}/operators/00_fast_clean_filter.js}"
 SPEED_SCRIPT="${SPEED_SCRIPT:-${APP_DIR}/operators/02_httpmeta_speed_filter.js}"
 
 [ -f "$SOURCES_FILE" ] || die "Sources file not found: ${SOURCES_FILE}"
-[ -f "$SPEED_SCRIPT" ] || die "Speed script not found: ${SPEED_SCRIPT}"
+[ -f "$FAST_SCRIPT" ] || die "Fast script not found: ${FAST_SCRIPT}"
+if [ "$USE_SPEED_FILTER" = "1" ]; then
+  [ -f "$SPEED_SCRIPT" ] || die "Speed script not found: ${SPEED_SCRIPT}"
+fi
 
 install_python3
 
-APP_DIR="$APP_DIR" \
 BASE_URL="$BASE_URL" \
 SOURCES_FILE="$SOURCES_FILE" \
+FAST_SCRIPT="$FAST_SCRIPT" \
 SPEED_SCRIPT="$SPEED_SCRIPT" \
 COLLECTION_NAME="$COLLECTION_NAME" \
 BOOTSTRAP_REPLACE_PRESET="$BOOTSTRAP_REPLACE_PRESET" \
+USE_SPEED_FILTER="$USE_SPEED_FILTER" \
 python3 <<'PY'
 import json
 import os
@@ -78,12 +71,13 @@ from pathlib import Path
 
 base_url = os.environ['BASE_URL'].rstrip('/')
 sources_file = Path(os.environ['SOURCES_FILE'])
+fast_script = Path(os.environ['FAST_SCRIPT'])
 speed_script = Path(os.environ['SPEED_SCRIPT'])
 collection_name = os.environ.get('COLLECTION_NAME', 'free-auto')
-replace_preset = os.environ.get('BOOTSTRAP_REPLACE_PRESET', '0') == '1'
+use_speed_filter = os.environ.get('USE_SPEED_FILTER', '0') == '1'
 
 
-def request(method, path, data=None, allow_404=False):
+def request(method, path, data=None, timeout=90):
     url = base_url + path
     body = None
     headers = {}
@@ -92,13 +86,11 @@ def request(method, path, data=None, allow_404=False):
         headers['Content-Type'] = 'application/json;charset=utf-8'
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode('utf-8', errors='replace')
             return resp.status, raw
     except urllib.error.HTTPError as e:
         raw = e.read().decode('utf-8', errors='replace')
-        if allow_404 and e.code == 404:
-            return e.code, raw
         raise RuntimeError(f'{method} {url} failed: HTTP {e.code}: {raw[:800]}')
     except Exception as e:
         raise RuntimeError(f'{method} {url} failed: {e}')
@@ -141,36 +133,23 @@ def extract_names(api_obj):
     return names
 
 
-def get_existing_names():
-    subs = extract_names(request_json('GET', '/api/subs'))
-    cols = extract_names(request_json('GET', '/api/collections'))
-    return subs, cols
-
-
 def create_or_update(kind, existing_names, name, payload):
     quoted = urllib.parse.quote(name, safe='')
     if kind == 'sub':
         create_path = '/api/subs'
         update_path = f'/api/sub/{quoted}'
-    elif kind == 'collection':
+    else:
         create_path = '/api/collections'
         update_path = f'/api/collection/{quoted}'
-    else:
-        raise ValueError(kind)
 
-    # Do not probe /api/sub/:name for missing subscriptions. Some Sub-Store
-    # builds return HTTP 500 for that route when the item is absent.
     if name in existing_names:
         request('PATCH', update_path, payload)
         return 'updated'
-
     try:
         request('POST', create_path, payload)
         existing_names.add(name)
         return 'created'
     except RuntimeError as e:
-        # Race-safe fallback: if another run created it after we listed names,
-        # patch it instead of failing the whole bootstrap.
         msg = str(e)
         if 'DUPLICATE_KEY' in msg or 'already exists' in msg:
             request('PATCH', update_path, payload)
@@ -184,9 +163,7 @@ def read_sources():
     out = []
     for raw in sources_file.read_text(encoding='utf-8').splitlines():
         line = raw.strip()
-        if not line or line.startswith('#'):
-            continue
-        if line in seen:
+        if not line or line.startswith('#') or line in seen:
             continue
         seen.add(line)
         out.append(line)
@@ -196,26 +173,20 @@ def read_sources():
 
 
 def source_display_name(index, url):
-    try:
-        parsed = urllib.parse.urlparse(url)
-        host = parsed.netloc or 'local'
-        path_tail = parsed.path.strip('/').split('/')[-1] or 'sub'
-        return f'{index:03d} {host}/{path_tail}'
-    except Exception:
-        return f'{index:03d} source'
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc or 'local'
+    path_tail = parsed.path.strip('/').split('/')[-1] or 'sub'
+    return f'{index:03d} {host}/{path_tail}'
 
 
 wait_backend()
-existing_subs, existing_cols = get_existing_names()
+existing_subs = extract_names(request_json('GET', '/api/subs'))
+existing_cols = extract_names(request_json('GET', '/api/collections'))
 sources = read_sources()
-script_content = speed_script.read_text(encoding='utf-8')
+operator_content = (speed_script if use_speed_filter else fast_script).read_text(encoding='utf-8')
+operator_name = 'http-meta-speed-filter' if use_speed_filter else 'fast-clean-filter'
 sub_names = []
 created = updated = 0
-
-if replace_preset:
-    # Reserved for future destructive reset logic. Current behavior is safe:
-    # update this project's preset entries without deleting unrelated user data.
-    pass
 
 for i, url in enumerate(sources, 1):
     name = f'source-{i:03d}'
@@ -243,10 +214,10 @@ collection = {
     'process': [
         {
             'type': 'Script Operator',
-            'customName': 'http-meta-speed-filter',
+            'customName': operator_name,
             'args': {
                 'mode': 'script',
-                'content': script_content,
+                'content': operator_content,
             },
         }
     ],
@@ -255,5 +226,6 @@ col_action = create_or_update('collection', existing_cols, collection_name, coll
 
 print(f'Subscriptions: created={created}, updated={updated}, total={len(sub_names)}')
 print(f'Collection {collection_name}: {col_action}')
+print(f'Operator: {operator_name}')
 print('Bootstrap completed.')
 PY
