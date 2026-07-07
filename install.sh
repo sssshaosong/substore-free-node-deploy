@@ -12,6 +12,9 @@ CHECK_TIMEOUT="${CHECK_TIMEOUT:-3}"
 FETCH_TIMEOUT="${FETCH_TIMEOUT:-25}"
 MAX_WORKERS="${MAX_WORKERS:-80}"
 MAX_NODES="${MAX_NODES:-500}"
+MIN_OUTPUT_NODES="${MIN_OUTPUT_NODES:-1}"
+SYNC_SOURCES_FROM_GITHUB="${SYNC_SOURCES_FROM_GITHUB:-1}"
+REMOTE_SOURCES_URL="${REMOTE_SOURCES_URL:-https://raw.githubusercontent.com/sssshaosong/substore-free-node-deploy/main/sources.txt}"
 REMOVE_OLD_SUBSTORE="${REMOVE_OLD_SUBSTORE:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -43,12 +46,11 @@ install_packages() {
 }
 
 ensure_runtime() {
-  local pkgs=(curl python3)
   if has_cmd apt-get; then
     apt-get update -y
-    apt-get install -y curl python3 python3-yaml
+    apt-get install -y curl python3 python3-yaml util-linux
   else
-    install_packages "${pkgs[@]}"
+    install_packages curl python3 util-linux
   fi
 }
 
@@ -67,6 +69,9 @@ CHECK_TIMEOUT=$CHECK_TIMEOUT
 FETCH_TIMEOUT=$FETCH_TIMEOUT
 MAX_WORKERS=$MAX_WORKERS
 MAX_NODES=$MAX_NODES
+MIN_OUTPUT_NODES=$MIN_OUTPUT_NODES
+SYNC_SOURCES_FROM_GITHUB=$SYNC_SOURCES_FROM_GITHUB
+REMOTE_SOURCES_URL=$REMOTE_SOURCES_URL
 EOF
 }
 
@@ -84,6 +89,23 @@ cd "$(dirname "$0")"
 set -a
 . ./config.env
 set +a
+
+if [ "${SYNC_SOURCES_FROM_GITHUB:-1}" = "1" ] && [ -n "${REMOTE_SOURCES_URL:-}" ]; then
+  tmp="${SOURCES_FILE}.new"
+  if curl -fsSL --max-time 25 -H 'Cache-Control: no-cache' "${REMOTE_SOURCES_URL}" -o "$tmp"; then
+    if [ -s "$tmp" ] && grep -Eq '^https?://' "$tmp"; then
+      mv -f "$tmp" "$SOURCES_FILE"
+      echo "[sources] updated from ${REMOTE_SOURCES_URL}"
+    else
+      rm -f "$tmp"
+      echo "[sources] remote sources invalid/empty, keeping local sources.txt" >&2
+    fi
+  else
+    rm -f "$tmp"
+    echo "[sources] failed to fetch remote sources, keeping local sources.txt" >&2
+  fi
+fi
+
 exec python3 ./generator.py
 EOF
   chmod +x "$APP_DIR/generate.sh"
@@ -122,7 +144,8 @@ cat <<INFO
 Static file server : ${BASE_URL}
 Listen             : ${LISTEN_ADDR}:${STATIC_PORT}
 Output dir         : ${OUTPUT_DIR}
-Timer              : every 6 hours
+Timer              : systemd timer, every 6 hours, Persistent=true
+Source list sync   : ${SYNC_SOURCES_FROM_GITHUB} (${REMOTE_SOURCES_URL})
 Connect check      : ${CONNECT_CHECK} (1=TCP remove unreachable, 0=skip)
 
 Subscription URLs:
@@ -130,6 +153,7 @@ v2rayN / V2Ray     : ${BASE_URL}/v2ray.txt
 Raw URI            : ${BASE_URL}/uri.txt
 Clash / Mihomo     : ${BASE_URL}/clash.yaml
 Status             : ${BASE_URL}/status.json
+Last error         : ${BASE_URL}/last_error.json
 
 Local files:
 ${OUTPUT_DIR}/v2ray.txt
@@ -139,6 +163,69 @@ ${OUTPUT_DIR}/status.json
 INFO
 EOF
   chmod +x "$APP_DIR/show-info.sh"
+
+  cat > "$APP_DIR/health-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+. ./config.env
+fail=0
+
+need_file() {
+  if [ ! -s "$1" ]; then
+    echo "FAIL: missing or empty $1"
+    fail=1
+  else
+    echo "OK  : $1"
+  fi
+}
+
+need_file "$OUTPUT_DIR/v2ray.txt"
+need_file "$OUTPUT_DIR/uri.txt"
+need_file "$OUTPUT_DIR/clash.yaml"
+need_file "$OUTPUT_DIR/status.json"
+
+if systemctl is-enabled free-node-sub-generate.timer >/dev/null 2>&1 && systemctl is-active free-node-sub-generate.timer >/dev/null 2>&1; then
+  echo "OK  : timer enabled and active"
+else
+  echo "FAIL: timer is not enabled/active"
+  fail=1
+fi
+
+if systemctl is-active free-node-sub-server.service >/dev/null 2>&1; then
+  echo "OK  : static server active"
+else
+  echo "FAIL: static server inactive"
+  fail=1
+fi
+
+python3 - <<'PY' || fail=1
+import json, sys
+from datetime import datetime, timezone
+from pathlib import Path
+status = json.loads(Path('output/status.json').read_text())
+print('OK  : status output_count =', status.get('output_count'))
+print('OK  : status source_ok_count =', status.get('source_ok_count'))
+raw = status.get('generated_at')
+if not raw:
+    print('FAIL: generated_at missing')
+    sys.exit(1)
+gen = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+age_hours = (datetime.now(timezone.utc) - gen).total_seconds() / 3600
+print(f'OK  : generated_at age = {age_hours:.2f} hours')
+if age_hours > 7:
+    print('FAIL: generated output is older than 7 hours')
+    sys.exit(1)
+if int(status.get('output_count') or 0) < 1:
+    print('FAIL: output_count < 1')
+    sys.exit(1)
+PY
+
+curl -fsSI --max-time 10 "http://127.0.0.1:${STATIC_PORT}/v2ray.txt" >/dev/null && echo "OK  : local HTTP v2ray.txt reachable" || { echo "FAIL: local HTTP v2ray.txt unreachable"; fail=1; }
+
+exit "$fail"
+EOF
+  chmod +x "$APP_DIR/health-check.sh"
 }
 
 write_systemd() {
@@ -151,7 +238,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=$APP_DIR
-ExecStart=$APP_DIR/generate.sh
+ExecStart=/usr/bin/flock -n /run/free-node-sub-generate.lock $APP_DIR/generate.sh
+TimeoutStartSec=45min
 Nice=10
 EOF
 
@@ -163,6 +251,8 @@ Description=Run free-node subscription generator every 6 hours
 OnBootSec=2min
 OnUnitActiveSec=6h
 Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
 Unit=free-node-sub-generate.service
 
 [Install]
@@ -212,10 +302,10 @@ log 3/6 "Installing systemd services"
 write_systemd
 log 4/6 "Generating subscription files now"
 if ! systemctl start free-node-sub-generate.service; then
-  journalctl -u free-node-sub-generate.service --no-pager -n 80 || true
+  journalctl -u free-node-sub-generate.service --no-pager -n 120 || true
   die "Initial generation failed"
 fi
-log 5/6 "Starting static file server"
+log 5/6 "Starting static file server and timer"
 systemctl restart free-node-sub-server.service
 systemctl start free-node-sub-generate.timer
 log 6/6 "Done"
