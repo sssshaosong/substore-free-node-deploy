@@ -1,7 +1,15 @@
 # Runtime data
 .env
+config.env
+output/
 data/
 *.log
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
 
 # OS/editor
 .DS_Store
