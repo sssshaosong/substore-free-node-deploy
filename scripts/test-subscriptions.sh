@@ -13,7 +13,6 @@ BACKEND_PATH="${BACKEND_PATH:-}"
 COLLECTION_NAME="${COLLECTION_NAME:-free-auto}"
 [ -n "$BACKEND_PATH" ] || { echo "BACKEND_PATH is empty. Run install.sh first." >&2; exit 1; }
 
-LOCAL_FRONTEND="http://127.0.0.1:${PORT}"
 LOCAL_BACKEND="http://127.0.0.1:${PORT}/${BACKEND_PATH}"
 
 check_url() {
@@ -29,7 +28,7 @@ check_url() {
   head -c 400 /tmp/substore-test-output.txt || true
   echo
   if [ "$code" = "404" ]; then
-    echo "Result: 404. For /api use backend path. For /share use root frontend path." >&2
+    echo "Result: 404. Check backend random path and collection name." >&2
     return 1
   fi
   if [ "$code" = "000" ]; then
@@ -42,16 +41,14 @@ check_url() {
   fi
 }
 
-echo "Local frontend base: ${LOCAL_FRONTEND}"
-echo "Local backend base : ${LOCAL_BACKEND}"
+echo "Local backend base: ${LOCAL_BACKEND}"
 echo
-echo "Important: /api uses backend path; /share uses root frontend path."
+echo "Important: this Docker image serves subscription downloads through the backend path: /BACKEND_PATH/download/collection/..."
 
 check_url "Backend API" "${LOCAL_BACKEND}/api/subs"
-check_url "v2rayN V2Ray base64" "${LOCAL_FRONTEND}/share/col/${COLLECTION_NAME}/V2Ray?includeUnsupportedProxy=true"
-check_url "URI raw list" "${LOCAL_FRONTEND}/share/col/${COLLECTION_NAME}/URI?includeUnsupportedProxy=true"
-check_url "Clash/Mihomo" "${LOCAL_FRONTEND}/share/col/${COLLECTION_NAME}/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true"
+check_url "v2rayN V2Ray base64" "${LOCAL_BACKEND}/download/collection/${COLLECTION_NAME}/V2Ray?includeUnsupportedProxy=true"
+check_url "URI raw list" "${LOCAL_BACKEND}/download/collection/${COLLECTION_NAME}/URI?includeUnsupportedProxy=true"
+check_url "Clash/Mihomo" "${LOCAL_BACKEND}/download/collection/${COLLECTION_NAME}/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true"
 
 echo
-echo "Local subscription endpoint tests passed."
-echo "If local tests pass but client gets 404, use the URL from ./show-info.sh and make sure Cloudflare Tunnel points to http://localhost:${PORT}."
+echo "Local subscription endpoint tests passed. Use the URLs from ./show-info.sh in clients."
