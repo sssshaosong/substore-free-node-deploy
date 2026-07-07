@@ -47,15 +47,13 @@ install_packages() {
   elif has_cmd apk; then
     apk add --no-cache "$@"
   else
-    die "No supported package manager found. Please install missing packages manually: $*"
+    die "No supported package manager found. Please install manually: $*"
   fi
 }
 
 ensure_curl() {
-  if has_cmd curl; then
-    return 0
-  fi
-  log "PRE" "curl missing, installing curl and ca-certificates..."
+  has_cmd curl && return 0
+  log PRE "curl missing, installing curl and ca-certificates..."
   install_packages curl ca-certificates
 }
 
@@ -73,9 +71,7 @@ start_docker_service() {
     service docker start >/dev/null 2>&1 || true
   fi
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if docker info >/dev/null 2>&1; then
-      return 0
-    fi
+    docker info >/dev/null 2>&1 && return 0
     sleep 1
   done
   die "Docker is installed but the daemon is not running. Run: systemctl status docker"
@@ -151,9 +147,7 @@ validate_collection_name() {
 }
 
 load_existing_backend_path() {
-  if [ -f "$APP_DIR/.env" ]; then
-    grep '^BACKEND_PATH=' "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- || true
-  fi
+  [ -f "$APP_DIR/.env" ] && grep '^BACKEND_PATH=' "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- || true
 }
 
 copy_project_files() {
@@ -175,9 +169,7 @@ copy_project_files() {
 
 write_runtime_files() {
   BACKEND_PATH="${BACKEND_PATH:-$(load_existing_backend_path)}"
-  if [ -z "${BACKEND_PATH:-}" ]; then
-    BACKEND_PATH="$(generate_backend_path)"
-  fi
+  [ -n "${BACKEND_PATH:-}" ] || BACKEND_PATH="$(generate_backend_path)"
 
   cat > "$APP_DIR/.env" <<ENVEOF
 APP_DIR=$APP_DIR
@@ -229,22 +221,18 @@ else
   if command -v curl >/dev/null 2>&1; then
     IP="$(curl -4 -fsS https://api.ipify.org 2>/dev/null || true)"
   fi
-  if [ -z "${IP:-}" ]; then
-    IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  fi
-  if [ -z "${IP:-}" ]; then
-    IP="YOUR_SERVER_IP"
-  fi
+  [ -n "${IP:-}" ] || IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -n "${IP:-}" ] || IP="YOUR_SERVER_IP"
   FRONTEND_URL="http://${IP}:${PORT}"
   BACKEND_URL="http://${IP}:${PORT}/${BACKEND_PATH}"
   UI_URL="http://${IP}:${PORT}?api=http://${IP}:${PORT}/${BACKEND_PATH}"
 fi
 
-# Sub-Store uses the random backend path for /api, but subscription share routes are served from the root frontend path.
-V2RAYN_URL="${FRONTEND_URL}/share/col/${COLLECTION_NAME}/V2Ray?includeUnsupportedProxy=true"
-URI_URL="${FRONTEND_URL}/share/col/${COLLECTION_NAME}/URI?includeUnsupportedProxy=true"
-CLASH_URL="${FRONTEND_URL}/share/col/${COLLECTION_NAME}/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true"
-SINGBOX_URL="${FRONTEND_URL}/share/col/${COLLECTION_NAME}/sing-box?includeUnsupportedProxy=true"
+# In this Docker image, /api and /download routes require the random backend path.
+V2RAYN_URL="${BACKEND_URL}/download/collection/${COLLECTION_NAME}/V2Ray?includeUnsupportedProxy=true"
+URI_URL="${BACKEND_URL}/download/collection/${COLLECTION_NAME}/URI?includeUnsupportedProxy=true"
+CLASH_URL="${BACKEND_URL}/download/collection/${COLLECTION_NAME}/Clash.Meta?includeUnsupportedProxy=true&prettyYaml=true"
+SINGBOX_URL="${BACKEND_URL}/download/collection/${COLLECTION_NAME}/sing-box?includeUnsupportedProxy=true"
 
 echo "Sub-Store frontend: ${FRONTEND_URL}"
 echo "Sub-Store backend : ${BACKEND_URL}"
@@ -260,10 +248,6 @@ echo "Bind address      : ${BIND_IP}:${PORT} -> container 3001"
 echo "Preset collection : ${COLLECTION_NAME}"
 echo "Sources file      : ${APP_DIR}/sources.txt"
 echo "Speed script      : ${APP_DIR}/operators/02_httpmeta_speed_filter.js"
-echo
-if [ -z "${DOMAIN:-}" ] && { [ "${NO_PUBLIC_IP:-0}" = "1" ] || [ "${USE_TUNNEL:-0}" = "1" ] || [ "${BIND_IP:-}" = "127.0.0.1" ]; }; then
-  echo "Public IP output is disabled/local-only. Use a tunnel, reverse proxy, or SSH port forwarding to access it remotely."
-fi
 INFOEOF
   chmod +x "$APP_DIR/show-info.sh"
 
@@ -280,9 +264,7 @@ run_compose() {
 }
 run_compose pull
 run_compose up -d
-if [ -x ./scripts/bootstrap-substore.sh ]; then
-  ./scripts/bootstrap-substore.sh
-fi
+[ -x ./scripts/bootstrap-substore.sh ] && ./scripts/bootstrap-substore.sh
 ./show-info.sh
 UPDATEEOF
   chmod +x "$APP_DIR/update.sh"
@@ -291,14 +273,11 @@ UPDATEEOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-run_compose() {
-  if docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
-  else
-    docker-compose "$@"
-  fi
-}
-run_compose down
+if docker compose version >/dev/null 2>&1; then
+  docker compose down
+else
+  docker-compose down
+fi
 printf "Keep data at %s/data. Remove it manually if you are sure.\n" "$(pwd)"
 UNINSTALLEOF
   chmod +x "$APP_DIR/uninstall.sh"
@@ -311,25 +290,19 @@ check_container_conflict() {
     if [ -n "$working_dir" ] && [ "$working_dir" != "<no value>" ] && [ "$working_dir" != "$APP_DIR" ]; then
       die "Container name ${CONTAINER_NAME} is already used by another compose project: ${working_dir}. Use CONTAINER_NAME=sub-store2 or remove the old container."
     fi
-    log "PRE" "Existing container ${CONTAINER_NAME} found. It will be reused/updated, not deleted."
+    log PRE "Existing container ${CONTAINER_NAME} found. It will be reused/updated, not deleted."
   fi
 }
 
 print_plan() {
-  log "PLAN" "APP_DIR=${APP_DIR}"
-  log "PLAN" "PORT=${PORT}, BIND_IP=${BIND_IP}, CONTAINER_NAME=${CONTAINER_NAME}"
-  log "PLAN" "USE_TUNNEL=${USE_TUNNEL}, NO_PUBLIC_IP=${NO_PUBLIC_IP}, DOMAIN=${DOMAIN:-none}"
-  log "PLAN" "AUTO_BOOTSTRAP=${AUTO_BOOTSTRAP}, COLLECTION_NAME=${COLLECTION_NAME}"
-  log "PLAN" "IMAGE=${IMAGE}"
-  if [ "$SKIP_PULL" = "1" ]; then
-    log "PLAN" "SKIP_PULL=1, image pull will be skipped."
-  fi
+  log PLAN "APP_DIR=${APP_DIR}"
+  log PLAN "PORT=${PORT}, BIND_IP=${BIND_IP}, CONTAINER_NAME=${CONTAINER_NAME}"
+  log PLAN "USE_TUNNEL=${USE_TUNNEL}, NO_PUBLIC_IP=${NO_PUBLIC_IP}, DOMAIN=${DOMAIN:-none}"
+  log PLAN "AUTO_BOOTSTRAP=${AUTO_BOOTSTRAP}, COLLECTION_NAME=${COLLECTION_NAME}"
+  log PLAN "IMAGE=${IMAGE}"
 }
 
-if [ "$(id -u)" -ne 0 ]; then
-  die "Please run as root: sudo bash install.sh"
-fi
-
+[ "$(id -u)" -eq 0 ] || die "Please run as root: sudo bash install.sh"
 validate_collection_name
 print_plan
 ensure_docker
@@ -339,8 +312,8 @@ check_container_conflict
 log "3/7" "Copying project files to ${APP_DIR}..."
 copy_project_files
 write_runtime_files
-
 cd "$APP_DIR"
+
 if [ "$SKIP_PULL" = "1" ]; then
   log "4/7" "Skipping image pull because SKIP_PULL=1."
 else
