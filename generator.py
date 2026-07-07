@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Static free-node subscription generator.
 
-This script is intentionally independent from Sub-Store. It fetches public sources,
-parses supported proxy formats, optionally removes TCP-unreachable nodes, and writes
-static files for subscription clients.
+Design goals:
+- Fetch the configured source URLs on every run; no cached source content.
+- Validate and de-duplicate nodes.
+- Optionally remove nodes whose server:port cannot be reached by TCP.
+- Write output files atomically, so clients never download half-written files.
+- Keep the last good output if the current generation fails or returns zero nodes.
 """
 
 from __future__ import annotations
@@ -15,14 +18,14 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
-import ssl
 import sys
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import yaml  # type: ignore
@@ -37,21 +40,24 @@ CHECK_TIMEOUT = float(os.getenv("CHECK_TIMEOUT", "3"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "80"))
 MAX_NODES = int(os.getenv("MAX_NODES", "500"))
 CONNECT_CHECK = os.getenv("CONNECT_CHECK", "1") == "1"
-USER_AGENT = os.getenv(
-    "USER_AGENT",
-    "Mozilla/5.0 (compatible; free-node-sub-generator/1.0)",
-)
+MIN_OUTPUT_NODES = int(os.getenv("MIN_OUTPUT_NODES", "1"))
+USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (compatible; free-node-sub-generator/2.0)")
 
-URI_RE = re.compile(
-    r"(?:vmess|vless|trojan|ss|ssr|hysteria2|hy2)://[^\s\"'<>]+",
-    re.IGNORECASE,
-)
-
+URI_RE = re.compile(r"(?:vmess|vless|trojan|ss|ssr|hysteria2|hy2)://[^\s\"'<>]+", re.IGNORECASE)
 Proxy = Dict[str, Any]
+
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
 
 def log(message: str) -> None:
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
+
+def write_json(path: Path, obj: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), "utf-8")
 
 
 def b64decode_maybe(text: str) -> Optional[str]:
@@ -86,9 +92,7 @@ def read_sources(path: Path) -> List[str]:
     seen = set()
     for raw in path.read_text("utf-8").splitlines():
         line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line in seen:
+        if not line or line.startswith("#") or line in seen:
             continue
         seen.add(line)
         sources.append(line)
@@ -96,15 +100,13 @@ def read_sources(path: Path) -> List[str]:
 
 
 def fetch_url(url: str) -> Tuple[str, Optional[str], Optional[str]]:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
     try:
         with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
             data = resp.read()
         text = data.decode("utf-8", errors="replace")
         decoded = b64decode_maybe(text)
-        if decoded:
-            text = decoded
-        return url, text, None
+        return url, decoded or text, None
     except Exception as e:
         return url, None, str(e)
 
@@ -125,12 +127,6 @@ def parse_vmess(uri: str) -> Optional[Proxy]:
             "network": obj.get("net") or "tcp",
             "tls": obj.get("tls") == "tls",
             "servername": obj.get("sni") or obj.get("host") or "",
-            "ws-opts": {
-                "path": obj.get("path") or "/",
-                "headers": {"Host": obj.get("host")},
-            }
-            if (obj.get("net") == "ws" and obj.get("host"))
-            else None,
             "uri": uri,
         }
     except Exception:
@@ -142,8 +138,7 @@ def parse_url_uri(uri: str) -> Optional[Proxy]:
         parsed = urllib.parse.urlparse(uri)
         scheme = parsed.scheme.lower()
         name = safe_name(urllib.parse.unquote(parsed.fragment), scheme)
-        query = urllib.parse.parse_qs(parsed.query)
-        q = {k: v[-1] for k, v in query.items() if v}
+        q = {k: v[-1] for k, v in urllib.parse.parse_qs(parsed.query).items() if v}
         server = parsed.hostname
         port = int(parsed.port or (443 if scheme in {"vless", "trojan"} else 8388))
         if not server:
@@ -225,8 +220,7 @@ def yaml_proxy_to_uri(p: Proxy) -> Optional[str]:
         params = {"security": "tls"}
         if p.get("sni"):
             params["sni"] = str(p.get("sni"))
-        qs = urllib.parse.urlencode(params)
-        return f"trojan://{password}@{server}:{port}?{qs}#{urllib.parse.quote(name)}"
+        return f"trojan://{password}@{server}:{port}?{urllib.parse.urlencode(params)}#{urllib.parse.quote(name)}"
     if typ == "vless":
         uuid = p.get("uuid") or p.get("id")
         params = {"encryption": "none", "type": str(p.get("network") or "tcp")}
@@ -283,19 +277,17 @@ def parse_yaml_proxies(text: str) -> List[Proxy]:
         obj = yaml.safe_load(text)
     except Exception:
         return []
-    proxies = []
+    proxies: List[Proxy] = []
+    items = []
     if isinstance(obj, dict) and isinstance(obj.get("proxies"), list):
-        for idx, item in enumerate(obj["proxies"], 1):
-            if isinstance(item, dict):
-                p = normalize_yaml_proxy(item, f"yaml-{idx}")
-                if p:
-                    proxies.append(p)
+        items = obj["proxies"]
     elif isinstance(obj, list):
-        for idx, item in enumerate(obj, 1):
-            if isinstance(item, dict):
-                p = normalize_yaml_proxy(item, f"yaml-{idx}")
-                if p:
-                    proxies.append(p)
+        items = obj
+    for idx, item in enumerate(items, 1):
+        if isinstance(item, dict):
+            p = normalize_yaml_proxy(item, f"yaml-{idx}")
+            if p:
+                proxies.append(p)
     return proxies
 
 
@@ -336,7 +328,6 @@ def filter_alive(proxies: List[Proxy]) -> Tuple[List[Proxy], int]:
         fut_map = {ex.submit(tcp_alive, p): p for p in proxies}
         for fut in concurrent.futures.as_completed(fut_map):
             p = fut_map[fut]
-            ok = False
             try:
                 ok = fut.result()
             except Exception:
@@ -352,12 +343,7 @@ def clash_proxy(p: Proxy) -> Optional[Dict[str, Any]]:
     typ = str(p.get("type", "")).lower()
     if typ not in {"ss", "trojan", "vmess", "vless"}:
         return None
-    out: Dict[str, Any] = {
-        "name": p["name"],
-        "type": typ,
-        "server": p["server"],
-        "port": int(p["port"]),
-    }
+    out: Dict[str, Any] = {"name": p["name"], "type": typ, "server": p["server"], "port": int(p["port"])}
     if typ == "ss":
         out["cipher"] = p.get("cipher") or ""
         out["password"] = p.get("password") or ""
@@ -373,8 +359,6 @@ def clash_proxy(p: Proxy) -> Optional[Dict[str, Any]]:
         if p.get("tls"):
             out["tls"] = True
             out["servername"] = p.get("servername") or ""
-        if p.get("ws-opts"):
-            out["ws-opts"] = p.get("ws-opts")
     elif typ == "vless":
         out["uuid"] = p.get("uuid")
         out["network"] = p.get("network") or "tcp"
@@ -386,93 +370,124 @@ def clash_proxy(p: Proxy) -> Optional[Dict[str, Any]]:
     return out
 
 
-def write_outputs(proxies: List[Proxy], status: Dict[str, Any]) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    uri_lines = [p.get("uri", "") for p in proxies if p.get("uri")]
-    uri_text = "\n".join(uri_lines) + ("\n" if uri_lines else "")
-    (OUTPUT_DIR / "uri.txt").write_text(uri_text, "utf-8")
-    (OUTPUT_DIR / "v2ray.txt").write_text(b64encode_text(uri_text), "utf-8")
+def write_outputs_atomically(proxies: List[Proxy], status: Dict[str, Any]) -> None:
+    if len(proxies) < MIN_OUTPUT_NODES:
+        raise RuntimeError(f"output_count {len(proxies)} is lower than MIN_OUTPUT_NODES={MIN_OUTPUT_NODES}; keep last good files")
 
-    clash_list = [cp for p in proxies if (cp := clash_proxy(p))]
-    names = [p["name"] for p in clash_list]
-    clash_config = {
-        "mixed-port": 7890,
-        "allow-lan": False,
-        "mode": "rule",
-        "log-level": "info",
-        "proxies": clash_list,
-        "proxy-groups": [{"name": "PROXY", "type": "select", "proxies": names or ["DIRECT"]}],
-        "rules": ["MATCH,PROXY"],
-    }
-    if yaml is not None:
-        clash_text = yaml.safe_dump(clash_config, allow_unicode=True, sort_keys=False)
-    else:
-        clash_text = json.dumps(clash_config, ensure_ascii=False, indent=2)
-    (OUTPUT_DIR / "clash.yaml").write_text(clash_text, "utf-8")
-    (OUTPUT_DIR / "status.json").write_text(json.dumps(status, ensure_ascii=False, indent=2), "utf-8")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_dir = OUTPUT_DIR.parent / f".{OUTPUT_DIR.name}.tmp-{os.getpid()}"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        uri_lines = [p.get("uri", "") for p in proxies if p.get("uri")]
+        uri_text = "\n".join(uri_lines) + ("\n" if uri_lines else "")
+        (tmp_dir / "uri.txt").write_text(uri_text, "utf-8")
+        (tmp_dir / "v2ray.txt").write_text(b64encode_text(uri_text), "utf-8")
+
+        clash_list = [cp for p in proxies if (cp := clash_proxy(p))]
+        names = [p["name"] for p in clash_list]
+        clash_config = {
+            "mixed-port": 7890,
+            "allow-lan": False,
+            "mode": "rule",
+            "log-level": "info",
+            "proxies": clash_list,
+            "proxy-groups": [{"name": "PROXY", "type": "select", "proxies": names or ["DIRECT"]}],
+            "rules": ["MATCH,PROXY"],
+        }
+        clash_text = yaml.safe_dump(clash_config, allow_unicode=True, sort_keys=False) if yaml is not None else json.dumps(clash_config, ensure_ascii=False, indent=2)
+        (tmp_dir / "clash.yaml").write_text(clash_text, "utf-8")
+        (tmp_dir / "status.json").write_text(json.dumps(status, ensure_ascii=False, indent=2), "utf-8")
+
+        for name in ["v2ray.txt", "uri.txt", "clash.yaml", "status.json"]:
+            os.replace(tmp_dir / name, OUTPUT_DIR / name)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def main() -> int:
     start = time.time()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    sources = read_sources(SOURCES_FILE)
-    log(f"Loaded {len(sources)} sources")
-    fetched: List[Tuple[str, Optional[str], Optional[str]]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(24, max(4, len(sources)))) as ex:
-        for item in ex.map(fetch_url, sources):
-            fetched.append(item)
+    started_at = utc_now()
+    try:
+        sources = read_sources(SOURCES_FILE)
+        if not sources:
+            raise RuntimeError(f"No sources found in {SOURCES_FILE}")
+        log(f"Loaded {len(sources)} sources")
 
-    all_proxies: List[Proxy] = []
-    source_status = []
-    for url, text, err in fetched:
-        if err or text is None:
-            source_status.append({"url": url, "ok": False, "error": err})
-            continue
-        proxies = parse_text(text)
-        source_status.append({"url": url, "ok": True, "parsed": len(proxies)})
-        all_proxies.extend(proxies)
+        fetched: List[Tuple[str, Optional[str], Optional[str]]] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(24, max(4, len(sources)))) as ex:
+            for item in ex.map(fetch_url, sources):
+                fetched.append(item)
 
-    seen = set()
-    unique: List[Proxy] = []
-    for p in all_proxies:
-        if not p.get("server") or not p.get("port"):
-            continue
-        key = key_for_proxy(p)
-        if key in seen:
-            continue
-        seen.add(key)
-        p["name"] = safe_name(p.get("name"), f"node-{len(unique) + 1}")
-        unique.append(p)
+        all_proxies: List[Proxy] = []
+        source_status = []
+        for url, text, err in fetched:
+            if err or text is None:
+                source_status.append({"url": url, "ok": False, "error": err})
+                continue
+            proxies = parse_text(text)
+            source_status.append({"url": url, "ok": True, "parsed": len(proxies)})
+            all_proxies.extend(proxies)
 
-    log(f"Parsed {len(all_proxies)} nodes, unique {len(unique)} nodes")
-    alive, dead_count = filter_alive(unique)
-    if CONNECT_CHECK:
-        log(f"TCP alive {len(alive)} nodes, removed {dead_count} dead nodes")
-    else:
-        log("CONNECT_CHECK=0, skipped TCP check")
-    alive = alive[:MAX_NODES]
-    for idx, p in enumerate(alive, 1):
-        p["name"] = f"Starss-{idx} {safe_name(p.get('name'), f'node-{idx}') }"
-        if p.get("uri"):
-            old = str(p["uri"])
-            if "#" in old:
-                old = old.split("#", 1)[0]
-            p["uri"] = old + "#" + urllib.parse.quote(p["name"])
+        seen = set()
+        unique: List[Proxy] = []
+        for p in all_proxies:
+            if not p.get("server") or not p.get("port"):
+                continue
+            key = key_for_proxy(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            p["name"] = safe_name(p.get("name"), f"node-{len(unique) + 1}")
+            unique.append(p)
 
-    status = {
-        "generated_at": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        "elapsed_seconds": round(time.time() - start, 2),
-        "connect_check": CONNECT_CHECK,
-        "source_count": len(sources),
-        "raw_parsed_count": len(all_proxies),
-        "unique_count": len(unique),
-        "output_count": len(alive),
-        "dead_removed_count": dead_count,
-        "sources": source_status,
-    }
-    write_outputs(alive, status)
-    log(f"Wrote {OUTPUT_DIR}/v2ray.txt, uri.txt, clash.yaml, status.json")
-    return 0 if alive else 2
+        log(f"Parsed {len(all_proxies)} nodes, unique {len(unique)} nodes")
+        alive, dead_count = filter_alive(unique)
+        if CONNECT_CHECK:
+            log(f"TCP alive {len(alive)} nodes, removed {dead_count} dead nodes")
+        else:
+            log("CONNECT_CHECK=0, skipped TCP check")
+        alive = alive[:MAX_NODES]
+        for idx, p in enumerate(alive, 1):
+            p["name"] = f"Starss-{idx} {safe_name(p.get('name'), f'node-{idx}')}"
+            if p.get("uri"):
+                old = str(p["uri"]).split("#", 1)[0]
+                p["uri"] = old + "#" + urllib.parse.quote(p["name"])
+
+        finished_at = utc_now()
+        status = {
+            "ok": True,
+            "started_at": started_at.isoformat().replace("+00:00", "Z"),
+            "generated_at": finished_at.isoformat().replace("+00:00", "Z"),
+            "next_run_hint_utc": (finished_at + dt.timedelta(hours=6)).isoformat().replace("+00:00", "Z"),
+            "elapsed_seconds": round(time.time() - start, 2),
+            "connect_check": CONNECT_CHECK,
+            "source_count": len(sources),
+            "source_ok_count": sum(1 for s in source_status if s.get("ok")),
+            "source_failed_count": sum(1 for s in source_status if not s.get("ok")),
+            "raw_parsed_count": len(all_proxies),
+            "unique_count": len(unique),
+            "output_count": len(alive),
+            "dead_removed_count": dead_count,
+            "sources": source_status,
+        }
+        write_outputs_atomically(alive, status)
+        log(f"Wrote {OUTPUT_DIR}/v2ray.txt, uri.txt, clash.yaml, status.json")
+        return 0
+    except Exception as e:
+        err = {
+            "ok": False,
+            "started_at": started_at.isoformat().replace("+00:00", "Z"),
+            "failed_at": utc_now().isoformat().replace("+00:00", "Z"),
+            "elapsed_seconds": round(time.time() - start, 2),
+            "error": str(e),
+            "kept_last_good_output": True,
+        }
+        write_json(OUTPUT_DIR / "last_error.json", err)
+        log(f"Generation failed: {e}")
+        return 2
 
 
 if __name__ == "__main__":
